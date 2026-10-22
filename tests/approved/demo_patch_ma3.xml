@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GMA3 DataVersion="2.1.0.0">
+  <Patch Name="Scene Visualiser">
+    <Layer Name="Visualiser">
+      <Fixture Name="Spot 1" FixtureID="101" CustomID="101" FixtureType="Generic@Spot_7ch" Mode="Default" Patch="1.001">
+        <Position X="-4.5" Y="6.2" Z="-2.5"/>
+        <Rotation X="0" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Spot 2" FixtureID="102" CustomID="102" FixtureType="Generic@Spot_7ch" Mode="Default" Patch="1.008">
+        <Position X="-2.7" Y="6.2" Z="-2.5"/>
+        <Rotation X="0" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Spot 3" FixtureID="103" CustomID="103" FixtureType="Generic@Spot_7ch" Mode="Default" Patch="1.015">
+        <Position X="-0.9" Y="6.2" Z="-2.5"/>
+        <Rotation X="0" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Spot 4" FixtureID="104" CustomID="104" FixtureType="Generic@Spot_7ch" Mode="Default" Patch="1.022">
+        <Position X="0.9" Y="6.2" Z="-2.5"/>
+        <Rotation X="0" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Spot 5" FixtureID="105" CustomID="105" FixtureType="Generic@Spot_7ch" Mode="Default" Patch="1.029">
+        <Position X="2.7" Y="6.2" Z="-2.5"/>
+        <Rotation X="0" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Spot 6" FixtureID="106" CustomID="106" FixtureType="Generic@Spot_7ch" Mode="Default" Patch="1.036">
+        <Position X="4.5" Y="6.2" Z="-2.5"/>
+        <Rotation X="0" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Wash 1" FixtureID="107" CustomID="107" FixtureType="Generic@Wash_RGBW" Mode="Default" Patch="1.043">
+        <Position X="-4.5" Y="6.3" Z="1.5"/>
+        <Rotation X="35" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Wash 2" FixtureID="108" CustomID="108" FixtureType="Generic@Wash_RGBW" Mode="Default" Patch="1.048">
+        <Position X="-2.7" Y="6.3" Z="1.5"/>
+        <Rotation X="35" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Wash 3" FixtureID="109" CustomID="109" FixtureType="Generic@Wash_RGBW" Mode="Default" Patch="1.053">
+        <Position X="-0.9" Y="6.3" Z="1.5"/>
+        <Rotation X="35" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Wash 4" FixtureID="110" CustomID="110" FixtureType="Generic@Wash_RGBW" Mode="Default" Patch="1.058">
+        <Position X="0.9" Y="6.3" Z="1.5"/>
+        <Rotation X="35" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Wash 5" FixtureID="111" CustomID="111" FixtureType="Generic@Wash_RGBW" Mode="Default" Patch="1.063">
+        <Position X="2.7" Y="6.3" Z="1.5"/>
+        <Rotation X="35" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Wash 6" FixtureID="112" CustomID="112" FixtureType="Generic@Wash_RGBW" Mode="Default" Patch="1.068">
+        <Position X="4.5" Y="6.3" Z="1.5"/>
+        <Rotation X="35" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Beam 1" FixtureID="113" CustomID="113" FixtureType="Generic@Beam_5ch" Mode="Default" Patch="1.073">
+        <Position X="-3" Y="1.5" Z="-2.9"/>
+        <Rotation X="180" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Beam 2" FixtureID="114" CustomID="114" FixtureType="Generic@Beam_5ch" Mode="Default" Patch="1.078">
+        <Position X="-1" Y="1.5" Z="-2.9"/>
+        <Rotation X="180" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Beam 3" FixtureID="115" CustomID="115" FixtureType="Generic@Beam_5ch" Mode="Default" Patch="1.083">
+        <Position X="1" Y="1.5" Z="-2.9"/>
+        <Rotation X="180" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Beam 4" FixtureID="116" CustomID="116" FixtureType="Generic@Beam_5ch" Mode="Default" Patch="1.088">
+        <Position X="3" Y="1.5" Z="-2.9"/>
+        <Rotation X="180" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Blinder 1" FixtureID="117" CustomID="117" FixtureType="Generic@Blinder" Mode="Default" Patch="1.093">
+        <Position X="-2" Y="6.6" Z="1.5"/>
+        <Rotation X="-70" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Blinder 2" FixtureID="118" CustomID="118" FixtureType="Generic@Blinder" Mode="Default" Patch="1.094">
+        <Position X="2" Y="6.6" Z="1.5"/>
+        <Rotation X="-70" Y="0" Z="0"/>
+      </Fixture>
+      <Fixture Name="Pixel bar 1" FixtureID="119" CustomID="119" FixtureType="Generic@Pixel_Bar_8" Mode="Default" Patch="1.095">
+        <Position X="0" Y="1.15" Z="-2.6"/>
+        <Rotation X="180" Y="0" Z="0"/>
+      </Fixture>
+    </Layer>
+  </Patch>
+</GMA3>

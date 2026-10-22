@@ -1,11 +1,15 @@
 #include "session.h"
 
+#include "core/interchange.h"
 #include "core/project_file.h"
 
 #include <QGuiApplication>
+#include <QStandardPaths>
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
+#include <fstream>
 
 using sv::json;
 
@@ -112,7 +116,99 @@ TEST_CASE("Session saves a package with the used GDTF types and opens it again")
     CHECK_FALSE(t.openProject(QUrl::fromLocalFile("/nonexistent.svproj")).isEmpty());
 }
 
+TEST_CASE("Session re-addresses the selection in fixture ID order and flags conflicts") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    CHECK(s.conflict_count() == 0);
+    const QVariantList rows = s.patch_rows();
+    REQUIRE(rows.size() == 19);
+    const QString spot2 = rows[1].toMap()["uuid"].toString(), spot1 = rows[0].toMap()["uuid"].toString();
+    s.selectUuids({spot2, spot1});
+    REQUIRE(s.readdressSelection("2.510").isEmpty());
+    CHECK(object(s, spot1)["patch"] == json({{"universe", 3}, {"address", 1}})); // 7 channels do not fit at 510
+    CHECK(object(s, spot2)["patch"] == json({{"universe", 3}, {"address", 8}}));
+    CHECK_FALSE(s.readdressSelection("1.600").isEmpty());
+
+    s.selectUuids({spot1});
+    REQUIRE(s.readdressSelection("1.008").isEmpty()); // on top of Spot 2's old range
+    CHECK(s.conflict_count() == 0);                   // Spot 2 moved away, so 1.008 is free again
+    s.selectUuids({spot2});
+    REQUIRE(s.readdressSelection("1.010").isEmpty());
+    CHECK(s.conflict_count() == 3); // 1.010-016 overlaps Spot 1 (008-014) and Spot 3 (015-021)
+    const auto occ = s.occupancy(1);
+    CHECK(occ[7] == 1); // Spot 1 alone
+    CHECK(occ[9] == 3); // Spot 2 (selected) wins the display
+    CHECK(occ[200] == 0);
+}
+
+TEST_CASE("Session imports an OBJ as set pieces, renders it and exports it again") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const auto obj = dir / "set.obj";
+    std::ofstream(obj) << "v 0 0 0\nv 100 0 0\nv 100 0 100\nv 0 0 100\ng Riser\nf 1 2 3 4\ng Ramp\nf 1 2 3\n";
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    REQUIRE(s.importObj(QUrl::fromLocalFile(QString::fromStdString(obj.string())), "cm", true, true).isEmpty());
+    const json &objects = s.document().data()["objects"];
+    REQUIRE(objects.size() == 2);
+    CHECK(objects[0]["type"] == "setPiece");
+    CHECK(objects[0]["geometry"] == "geometry/set.obj");
+    CHECK(objects[1]["group"] == "Ramp");
+    CHECK(objects[0]["scale"][0] == 0.01);
+    CHECK(s.selection_count() == 2);
+    REQUIRE(s.meshes()->contains("geometry/set.obj#Riser"));
+
+    const auto scene = sv::render::build_scene(*s.snapshot(), {}, {}, 0, *s.meshes());
+    REQUIRE(scene.meshes.size() == 2);
+    // Z-up file, rotated -90 about X: the riser's +Z (100 cm) edge becomes 1 m up.
+    CHECK(scene.meshes[0].model.map(QVector3D(0, 0, 100)).y() == Catch::Approx(1.0f).margin(1e-4));
+
+    const auto out = dir / "scene.obj";
+    REQUIRE(s.exportFile("obj", QUrl::fromLocalFile(QString::fromStdString(out.string()))).isEmpty());
+    std::ifstream in(out);
+    const std::string text((std::istreambuf_iterator<char>(in)), {});
+    const auto groups = sv::parse_obj(text);
+    REQUIRE(groups.size() == 2);
+    CHECK(groups[0].name == "Riser");
+    CHECK(groups[0].vertices.size() == 2 * 3 * 6);
+    CHECK(s.exportFile("nope", QUrl::fromLocalFile("/tmp/x")).size() > 0);
+}
+
+TEST_CASE("Session autosaves unsaved edits and offers them back after a crash (AT-6)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "crash.svproj";
+    std::filesystem::remove(path);
+    std::filesystem::remove(sv::autosave_path(path));
+    const QUrl url = QUrl::fromLocalFile(QString::fromStdString(path.string()));
+    {
+        Session s(nullptr);
+        s.set_project(sv::demo_project());
+        REQUIRE(s.saveProject(url).isEmpty());
+        s.autosave(); // nothing unsaved: no file
+        CHECK_FALSE(std::filesystem::exists(sv::autosave_path(path)));
+        s.edit(QString::fromStdString(s.document().data()["objects"][0]["uuid"]), "/name", "After the save");
+        s.autosave();
+        CHECK(std::filesystem::exists(sv::autosave_path(path)));
+    } // "crash": the session goes away without saving
+    Session t(nullptr);
+    REQUIRE(t.openProject(url).isEmpty());
+    REQUIRE_FALSE(t.recovery_file().isEmpty());
+    CHECK(t.document().data()["objects"][0]["name"] != "After the save"); // the valid saved package
+    REQUIRE(t.recover().isEmpty());
+    CHECK(t.document().data()["objects"][0]["name"] == "After the save");
+    CHECK(t.dirty());
+    CHECK(t.file_path() == QString::fromStdString(path.string()));
+    REQUIRE(t.saveProject({}).isEmpty());
+    CHECK_FALSE(std::filesystem::exists(sv::autosave_path(path)));
+
+    Session u(nullptr);
+    REQUIRE(u.openProject(url).isEmpty());
+    CHECK(u.recovery_file().isEmpty());
+}
+
 int main(int argc, char *argv[]) {
+    QStandardPaths::setTestModeEnabled(true);           // the untitled autosave goes to a test location
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) // also covers test discovery at build time
         qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv); // composition text needs fonts

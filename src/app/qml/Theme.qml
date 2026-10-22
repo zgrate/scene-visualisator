@@ -17,6 +17,8 @@ QtObject {
     readonly property color err: "#ff6b6b"
     readonly property color field: "#14161b"
     readonly property color control: "#23262e"
+    // DMX monitor winner stripes, by source index; kept apart from the ok/warn/err trio.
+    readonly property var sources: ["#4c8dff", "#c792ea", "#4dd0e1", "#f78c6c"]
 
     readonly property int rail: 36
     readonly property int titleBar: 30

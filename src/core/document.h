@@ -2,6 +2,7 @@
 // FR-26: every edit is a JSON patch applied through Document::apply; undo applies the stored inverse.
 #include "core/model.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@ class Document {
 
     bool dirty() const { return cursor_ != saved_cursor_; }
     void mark_saved() { saved_cursor_ = cursor_; }
+    void mark_unsaved() { saved_cursor_ = SIZE_MAX; } // e.g. recovered from an autosave
 
   private:
     json data_;

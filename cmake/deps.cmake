@@ -1,6 +1,6 @@
 # Third-party code via FetchContent, pinned by tag (decision D4: no vcpkg in alpha).
-# shortcut: only deps the current milestone uses are declared, add spdlog/tinyobjloader here in the milestone
-# that first includes them (M6).
+# Only deps the code uses are declared: the OBJ reader (core/interchange) and the log file (app/main.cpp) are our own,
+# so tinyobjloader and spdlog from the plan were not needed.
 include(FetchContent)
 
 FetchContent_Declare(nlohmann_json

@@ -3,7 +3,8 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 
-// Project screen: new, open, save, save as, import GDTF. Errors show inline under the buttons.
+// Project screen: new, open, save, save as, imports (GDTF, OBJ, Resolume) and exports (patch CSV, grandMA3 patch,
+// Resolume Advanced Output, OBJ). Errors show inline under the buttons.
 Rectangle {
     id: screen
     color: Theme.bg
@@ -35,9 +36,45 @@ Rectangle {
         onAccepted: screen.report(Session.importGdtf(selectedFile), qsTr("Fixture type imported"))
     }
 
+    FileDialog {
+        id: objDialog
+        nameFilters: [qsTr("Wavefront OBJ (*.obj)")]
+        onAccepted: screen.report(Session.importObj(selectedFile, unit.currentText, zUp.checked, split.checked),
+                                  qsTr("Set piece imported"))
+    }
+    FileDialog {
+        id: resolumeDialog
+        nameFilters: [qsTr("Resolume Advanced Output (*.xml)")]
+        onAccepted: screen.report(Session.importResolume(selectedFile), qsTr("Screens imported"))
+    }
+    // One save dialog for every export; kind picks the format, suffix and filter.
+    FileDialog {
+        id: exportDialog
+        property string kind
+        readonly property var formats: ({
+            csv: ["csv", qsTr("Patch CSV (*.csv)")],
+            ma3: ["xml", qsTr("grandMA3 patch (*.xml)")],
+            resolume: ["xml", qsTr("Resolume Advanced Output (*.xml)")],
+            obj: ["obj", qsTr("Wavefront OBJ (*.obj)")],
+            objSelection: ["obj", qsTr("Wavefront OBJ (*.obj)")]
+        })
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: kind ? formats[kind][0] : ""
+        nameFilters: kind ? [formats[kind][1]] : []
+        onAccepted: screen.report(Session.exportFile(kind, selectedFile), qsTr("Exported"))
+    }
+    function exportAs(kind) { exportDialog.kind = kind; exportDialog.open() }
+
+    component Section: Label {
+        color: Theme.muted
+        font.pixelSize: Theme.small
+        font.letterSpacing: 1
+        topPadding: 6
+    }
+
     Rectangle {
         anchors.centerIn: parent
-        width: 420
+        width: 460
         height: col.implicitHeight + 32
         color: Theme.panel
         border.color: Theme.line
@@ -68,7 +105,39 @@ Rectangle {
                 Button { text: qsTr("Save"); onClicked: screen.save() }
                 Button { text: qsTr("Save as…"); onClicked: saveDialog.open() }
             }
-            Button { text: qsTr("Import GDTF…"); onClicked: gdtfDialog.open() }
+            Section { text: qsTr("IMPORT") }
+            RowLayout {
+                spacing: 6
+                Button { text: qsTr("GDTF…"); onClicked: gdtfDialog.open() }
+                Button { text: qsTr("Resolume screens…"); onClicked: resolumeDialog.open() }
+            }
+            RowLayout {
+                spacing: 6
+                Button { text: qsTr("OBJ set piece…"); onClicked: objDialog.open() }
+                ComboBox {
+                    id: unit
+                    implicitWidth: 64
+                    model: ["m", "cm", "mm", "in", "ft"]
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Unit the OBJ file is in")
+                }
+                Check { id: zUp; text: qsTr("Z up") }
+                Check { id: split; text: qsTr("Split groups") }
+            }
+            Section { text: qsTr("EXPORT") }
+            Flow {
+                Layout.fillWidth: true
+                spacing: 6
+                Button { text: qsTr("Patch CSV…"); onClicked: screen.exportAs("csv") }
+                Button { text: qsTr("grandMA3 patch…"); onClicked: screen.exportAs("ma3") }
+                Button { text: qsTr("Resolume output…"); onClicked: screen.exportAs("resolume") }
+                Button { text: qsTr("OBJ scene…"); onClicked: screen.exportAs("obj") }
+                Button {
+                    text: qsTr("OBJ selection…")
+                    enabled: Session.selectionCount > 0
+                    onClicked: screen.exportAs("objSelection")
+                }
+            }
             Label {
                 visible: screen.message !== ""
                 text: screen.message

@@ -9,3 +9,4 @@ CMakeUserPresets.json
 /.playwright-mcp/
 aqtinstall.log
 __pycache__/
+*.received

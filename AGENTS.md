@@ -86,7 +86,12 @@ Hard rules:
   Floating cards sit on top: Objects at top-left, Inspector at top-right. They can be dragged and collapsed, and their
   positions persist in the project's `layout`.
 - **Dock:** a bottom dock holds the 512-bar universe meter. It is a C++ `QQuickItem` with one geometry node, never a
-  Repeater.
+  Repeater. The patch sheet reuses it with `occupancy: true`.
+- **Screens:** Patch sheet (`PatchScreen.qml`), DMX monitor (`DmxScreen.qml`, grid is the C++ `ChannelGrid`) and Project
+  (`ProjectScreen.qml`) cover the viewport, which keeps running underneath. `--screen patch|dmx|project` starts on one,
+  which is how screenshots of them are taken.
+- **Controls:** use `Input` and `Check` (Studio-styled TextField and CheckBox) for free-standing fields; stock Fusion
+  ones vanish on dark panels. Inspector rows use `Field`.
 - **Title bar:** the project name (• when unsaved), the tabs Design/Patch/DMX (Plan and Mapping are Beta), and the
   Art-Net/sACN status.
 - **Colours:** use the `Theme` QML singleton only (`src/app/qml/Theme.qml`). Components contain no colour literals.
@@ -128,10 +133,12 @@ Hard rules:
 - **D0:** toolchain from pip in user space (cmake, ninja, aqtinstall, clang-format, clangd). There is no sudo here.
 - **D1:** Linux for daily dev, Windows and macOS through CI. NFR-2 frame rate is measured on a real GPU laptop.
 - **D2:** Qt 6.12.0 LTS (fallback 6.8.3 LTS).
-- **D3:** Qt under LGPL v3 with dynamic linking, confirmed by the user on 2026-10-22. Ship Qt as replaceable shared
+- **D3:** the project is LGPL-3.0-or-later (`COPYING.LESSER` + `COPYING`). Qt under LGPL v3 with dynamic linking,
+  confirmed by the user on 2026-10-22. Ship Qt as replaceable shared
   libraries, never statically linked. Use only modules offered under LGPL; check `$QT_ROOT_DIR/sbom/*.spdx` before
   adding one. Build tools such as qsb and moc are GPL with Qt's exception, so their output carries no obligation.
-- **D4:** FetchContent for the alpha, not vcpkg. Switch to a vcpkg manifest in Beta (NDI, Spout, FBX).
+- **D4:** FetchContent for the alpha, not vcpkg. Switch to a vcpkg manifest in Beta (NDI, Spout, FBX). The plan's
+  spdlog and tinyobjloader were not needed: the OBJ reader is in `core/interchange` and the log is a Qt message handler.
 - **D5:** our own GDTF reader on pugixml and miniz, not libMVRgdtf (licence and Boost/Xerces). No GDTF 3D models
   in alpha.
 - **D6:** built-in meshes for fixtures, trusses and walls. OBJ import produces static set pieces.
@@ -152,6 +159,12 @@ Hard rules:
   tracking come with it.
 - **`core/project_file.h`:** `load_package` and `save_package` handle `.svproj` with atomic writes and three backups.
   `write_autosave` and `has_newer_autosave` support recovery on launch (AT-6).
+- **`core/interchange.h`:** `patch_csv`, `ma3_patch_xml`, `resolume_xml` (exports, byte-checked against
+  `tests/approved/`), `resolume_import_patch` (a JSON patch: composition size, walls matched by name), `parse_obj`
+  (groups with flat-normal vertices) and `unit_scale`. Errors throw `InterchangeError`. To re-approve an export, check
+  the `.received` file the test writes, then move it over the approved one.
+- **`nlohmann` gotcha:** `json::value(key, default)` returns a temporary. Never keep a pointer or reference into it;
+  iterate `at(key)` behind a `contains` check instead.
 
 ## 11. DMX API in brief (M2)
 - **`protocol/dmx_engine.h`:** `DmxEngine` owns the network thread. It handles Art-Net (ArtDmx, ArtSync hold, ArtPoll
@@ -217,3 +230,20 @@ Hard rules:
   QML builds its own instance instead of calling `create()`.
 - **Tests:** `sv_session_tests` compiles `session.cpp` directly and runs offscreen. UI checks use `tools/screenshot.sh`
   or `xdotool` under `xvfb-run`; with no window manager there, the window is never active, so `Shortcut`s do not fire.
+
+## 15. Patch, DMX monitor and interchange (M6)
+- **Session additions:** `patchRows` (one map per fixture: id, name, type, mode, universe, address, patch, footprint,
+  position, conflict, overflow, selected), `conflictCount`, `recoveryFile`. `dmxStatus.perUniverse[u]` also has `lost`
+  and `dropped`. C++ only: `occupancy(u)` (512 states: 0 free, 1 used, 2 conflict, 3 selected) and `meshes()`.
+- **Actions:** `readdressSelection("u.a")` packs the selection in fixture-ID order, rolling to the next universe.
+  `selectUuids(list)`. `exportFile(kind, url)` with kind `csv`, `ma3`, `resolume`, `obj` or `objSelection`.
+  `importResolume(url)`, `importObj(url, unit, zUp, split)` (copies the file to `geometry/` in the package and adds
+  set pieces). `recover()` and `discardRecovery()`. All return an error string where they can fail.
+- **Set pieces:** the renderer draws `MeshLibrary` meshes keyed `geometry/x.obj` or `geometry/x.obj#Group`, double
+  sided. A missing mesh shows a red marker box. `export_obj` reuses `build_scene`, one `g` per object, walls as
+  `<name>_screen` quads.
+- **Autosave (AT-6):** every 2 min to `<file>.autosave`, or `AppDataLocation/Untitled.svproj.autosave` for an untitled
+  project. Main.qml offers Recover/Discard when `recoveryFile` is set. Recovery keeps the real path, so the next save
+  replaces the real file.
+- **Log:** every Qt message also goes to `AppDataLocation/logs/scene-visualiser.log`, rotated at launch (three kept).
+- **Release artefacts:** CI packs Windows (windeployqt, zip) and macOS (macdeployqt, dmg) builds, unsigned.

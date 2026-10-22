@@ -247,15 +247,44 @@ ApplicationWindow {
             anchors.fill: parent
         }
 
-        Rectangle {
-            visible: win.screen === "patch" || win.screen === "dmx"
+        PatchScreen {
+            visible: win.screen === "patch"
             anchors.fill: parent
-            color: Theme.bg
-            Label {
-                anchors.centerIn: parent
-                text: qsTr("This screen arrives in M6")
-                color: Theme.muted
-            }
         }
+
+        DmxScreen {
+            visible: win.screen === "dmx"
+            anchors.fill: parent
+        }
+    }
+
+    // AT-6: an autosave newer than the saved file (or an untitled one) is offered once on launch or open.
+    Dialog {
+        id: recovery
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Recover unsaved work?")
+        closePolicy: Popup.NoAutoClose
+        Label {
+            text: qsTr("An autosave newer than the project was found:\n%1").arg(Session.recoveryFile)
+            color: Theme.fg
+            wrapMode: Text.Wrap
+            width: 420
+        }
+        footer: DialogButtonBox {
+            Button { text: qsTr("Recover"); DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+            Button { text: qsTr("Discard"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        }
+        onAccepted: {
+            const error = Session.recover()
+            if (error) { project.report(error, ""); win.screen = "project" }
+        }
+        onRejected: Session.discardRecovery()
+        function check() { if (Session.recoveryFile !== "" && !opened) open() }
+        Component.onCompleted: check()
+    }
+    Connections {
+        target: Session
+        function onChanged() { recovery.check() }
     }
 }

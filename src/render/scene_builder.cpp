@@ -14,6 +14,7 @@ const QVector3D accent(0x4c / 255.f, 0x8d / 255.f, 0xff / 255.f); // Theme accen
 const QVector4D truss_colour(0xa8 / 255.f, 0xad / 255.f, 0xb8 / 255.f, 1);
 const QVector4D deck_colour(0x23 / 255.f, 0x26 / 255.f, 0x2e / 255.f, 1);
 const QVector4D wall_back(0x15 / 255.f, 0x17 / 255.f, 0x1c / 255.f, 1);
+const QVector4D piece_colour(0x6b / 255.f, 0x70 / 255.f, 0x80 / 255.f, 1);
 
 QVector3D vec3(const json &j, QVector3D fallback = {}) {
     if (!j.is_array() || j.size() != 3)
@@ -48,6 +49,7 @@ struct Builder {
     const std::map<std::string, FixtureState> &fixtures;
     const std::set<std::string> &selected;
     double time;
+    const MeshLibrary &meshes;
     RenderScene scene;
     std::map<std::string, const json *> by_uuid;
 
@@ -165,6 +167,22 @@ struct Builder {
         scene.pick.push_back({box(m, {0, h / 2, -0.04f}, {w, h, 0.1f}), uuid});
     }
 
+    void set_piece(const json &o, const std::string &uuid, bool sel) {
+        std::string key = o.value("geometry", std::string());
+        if (const std::string group = o.value("group", std::string()); !group.empty())
+            key += "#" + group;
+        const QMatrix4x4 m = world(o);
+        const auto it = meshes.find(key);
+        if (it == meshes.end()) { // geometry missing from the package: a marker box so it can be selected and fixed
+            scene.boxes.push_back({box(m, {0, 0.5f, 0}, {1, 1, 1}), tinted({0.5f, 0.2f, 0.2f, 1}, sel)});
+            scene.pick.push_back({box(m, {0, 0.5f, 0}, {1, 1, 1}), uuid});
+            return;
+        }
+        const Mesh &mesh = *it->second;
+        scene.meshes.push_back({it->second, m, tinted(piece_colour, sel)});
+        scene.pick.push_back({box(m, (mesh.lo + mesh.hi) / 2, mesh.hi - mesh.lo), uuid});
+    }
+
     void run() {
         const json &venue = project.value("venue", json::object());
         scene.venue_width = venue.value("width", 20.0f);
@@ -181,7 +199,9 @@ struct Builder {
         for (const json &o : objects)
             if (o.contains("uuid") && o["uuid"].is_string())
                 by_uuid[o["uuid"].get<std::string>()] = &o;
-        for (const json &o : objects) {
+        for (std::size_t i = 0; i < objects.size(); ++i) {
+            const json &o = objects[i];
+            const std::size_t boxes = scene.boxes.size(), walls = scene.walls.size(), pieces = scene.meshes.size();
             const std::string uuid = o.value("uuid", std::string());
             const std::string type = o.value("type", std::string());
             const bool sel = selected.contains(uuid);
@@ -191,7 +211,15 @@ struct Builder {
                 truss(o, uuid, sel);
             else if (type == "ledWall")
                 wall(o, uuid, sel);
-            // shortcut: set pieces render once OBJ import lands (M6); cameras are not drawn.
+            else if (type == "setPiece")
+                set_piece(o, uuid, sel);
+            // Cameras are not drawn.
+            for (auto k = boxes; k < scene.boxes.size(); ++k)
+                scene.boxes[k].owner = int(i);
+            for (auto k = walls; k < scene.walls.size(); ++k)
+                scene.walls[k].owner = int(i);
+            for (auto k = pieces; k < scene.meshes.size(); ++k)
+                scene.meshes[k].owner = int(i);
         }
     }
 };
@@ -252,9 +280,23 @@ std::map<std::string, FixtureState> decode_fixtures(const json &project, const F
     return out;
 }
 
+std::shared_ptr<const Mesh> make_mesh(std::vector<float> vertices) {
+    auto m = std::make_shared<Mesh>();
+    m->lo = QVector3D(1e30f, 1e30f, 1e30f), m->hi = -m->lo;
+    for (std::size_t i = 0; i + 5 < vertices.size(); i += 6) {
+        const QVector3D p(vertices[i], vertices[i + 1], vertices[i + 2]);
+        m->lo = QVector3D(std::min(m->lo.x(), p.x()), std::min(m->lo.y(), p.y()), std::min(m->lo.z(), p.z()));
+        m->hi = QVector3D(std::max(m->hi.x(), p.x()), std::max(m->hi.y(), p.y()), std::max(m->hi.z(), p.z()));
+    }
+    if (vertices.empty())
+        m->lo = m->hi = {};
+    m->vertices = std::move(vertices);
+    return m;
+}
+
 RenderScene build_scene(const json &project, const std::map<std::string, FixtureState> &fixtures,
-                        const std::set<std::string> &selected, double time_s) {
-    Builder b{project, fixtures, selected, time_s, {}, {}};
+                        const std::set<std::string> &selected, double time_s, const MeshLibrary &meshes) {
+    Builder b{project, fixtures, selected, time_s, meshes, {}, {}};
     b.run();
     return std::move(b.scene);
 }
@@ -288,6 +330,81 @@ std::vector<proto::GeneratorTarget> generator_targets(const json &project, const
             for (auto &[geometry, c] : by_geometry)
                 t.cells.push_back({c["ColorAdd_R"], c["ColorAdd_G"], c["ColorAdd_B"]});
         out.push_back(std::move(t));
+    }
+    return out;
+}
+
+std::string export_obj(const json &project, const FixtureLibrary &library, const MeshLibrary &meshes,
+                       const std::set<std::string> &only) {
+    const RenderScene scene = build_scene(
+        project, decode_fixtures(project, library, [](std::uint16_t) { return std::span<const std::uint8_t>(); }), {},
+        0, meshes);
+    const json &objects = project.value("objects", json::array());
+    // Per owner: triangles as world-space positions (normals are left to the importing tool).
+    std::map<int, std::vector<QVector3D>> tris;
+    static const auto cube = [] {
+        std::vector<QVector3D> v;
+        const QVector3D faces[6][3] = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, {{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}},
+                                       {{0, 1, 0}, {0, 0, 1}, {1, 0, 0}}, {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}},
+                                       {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}}, {{0, 0, -1}, {0, 1, 0}, {1, 0, 0}}};
+        for (const auto &[n, u, w] : faces)
+            for (auto [a, b] : {std::pair{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}})
+                v.push_back(0.5f * (n + float(a) * u + float(b) * w));
+        return v;
+    }();
+    for (const BoxInstance &b : scene.boxes)
+        for (const QVector3D &p : cube)
+            tris[b.owner].push_back(b.model.map(p));
+    for (const MeshInstance &m : scene.meshes)
+        for (std::size_t i = 0; i + 5 < m.mesh->vertices.size(); i += 6)
+            tris[m.owner].push_back(
+                m.model.map(QVector3D(m.mesh->vertices[i], m.mesh->vertices[i + 1], m.mesh->vertices[i + 2])));
+    std::map<int, const WallInstance *> walls;
+    for (const WallInstance &w : scene.walls)
+        walls[w.owner] = &w;
+
+    std::string out = "# Scene Visualiser OBJ export: metres, Y-up, one group per scene object\n";
+    std::size_t next = 1; // OBJ indices are 1-based and global
+    const auto emit = [&](std::string name, const std::vector<QVector3D> &v, const char *material,
+                          std::size_t corners = 3) {
+        std::ranges::replace(name, ' ', '_'); // group names end at whitespace in most readers
+        out += "g " + name + "\n";
+        if (material)
+            out += std::string("usemtl ") + material + "\n";
+        char buf[96];
+        for (const QVector3D &p : v) {
+            std::snprintf(buf, sizeof buf, "v %.4f %.4f %.4f\n", p.x(), p.y(), p.z());
+            out += buf;
+        }
+        for (std::size_t i = 0; i + corners <= v.size(); i += corners) {
+            out += "f";
+            for (std::size_t k = 0; k < corners; ++k)
+                out += " " + std::to_string(next + i + k);
+            out += "\n";
+        }
+        next += v.size();
+    };
+    const auto wanted = [&](int owner) {
+        if (only.empty())
+            return true;
+        return owner >= 0 && only.contains(objects[std::size_t(owner)].value("uuid", std::string()));
+    };
+    if (wanted(-1) && tris.contains(-1))
+        emit("Venue", tris[-1], nullptr);
+    for (std::size_t i = 0; i < objects.size(); ++i) {
+        if (!wanted(int(i)))
+            continue;
+        const std::string name = objects[i].value("name", std::string("Object ") + std::to_string(i + 1));
+        if (const auto it = tris.find(int(i)); it != tris.end())
+            emit(name, it->second, nullptr);
+        if (const auto it = walls.find(int(i));
+            it != walls.end()) { // the emissive face, named so renderers can texture it
+            const QMatrix4x4 &m = it->second->model;
+            emit(name + "_screen",
+                 {m.map(QVector3D(-.5f, -.5f, 0)), m.map(QVector3D(.5f, -.5f, 0)), m.map(QVector3D(.5f, .5f, 0)),
+                  m.map(QVector3D(-.5f, .5f, 0))},
+                 "screen", 4);
+        }
     }
     return out;
 }

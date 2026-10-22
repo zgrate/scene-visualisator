@@ -53,3 +53,24 @@ jobs:
             smoke-*.png
             build/*/tests/render_golden_actual.png
           if-no-files-found: warn
+
+      # Alpha release artefacts: unsigned, Qt deployed next to the app (LGPL v3, dynamic linking). Signing is Beta.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/SceneVisualiser && cp ${{ matrix.app }} dist/SceneVisualiser/
+          windeployqt --release --qmldir src/app/qml dist/SceneVisualiser/SceneVisualiser.exe
+          cp COPYING COPYING.LESSER dist/SceneVisualiser/
+          (cd dist && 7z a ../SceneVisualiser-windows.zip SceneVisualiser)
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          macdeployqt build/mac/bin/SceneVisualiser.app -qmldir=src/app/qml -dmg
+          mv build/mac/bin/SceneVisualiser.dmg SceneVisualiser-macos.dmg
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'Linux'
+        with:
+          name: SceneVisualiser-${{ runner.os }}
+          path: SceneVisualiser-*.*
+          if-no-files-found: error

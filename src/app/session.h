@@ -2,6 +2,7 @@
 // App state shared by QML and the viewport: document, fixture library, DMX engine, selection. Lives on the GUI
 // thread; the render thread reads it only from ViewportItem's synchronize(), while the GUI thread is blocked.
 #include "core/document.h"
+#include "core/project_file.h"
 #include "protocol/dmx_engine.h"
 #include "render/scene_builder.h"
 
@@ -11,6 +12,7 @@
 #include <QUrl>
 #include <QVariant>
 #include <QVector3D>
+#include <array>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -36,7 +38,11 @@ class Session : public QObject {
     Q_PROPERTY(bool canRedo READ can_redo NOTIFY changed)
     Q_PROPERTY(QVariantMap layout READ layout NOTIFY changed)
     Q_PROPERTY(QVariantList universes READ universes NOTIFY changed) // patched universes, ascending
-    Q_PROPERTY(QVariantMap dmxStatus READ dmx_status NOTIFY dmxChanged) // {artnet, sacn: rate or -1, perUniverse}
+    Q_PROPERTY(QVariantMap dmxStatus READ dmx_status NOTIFY
+                   dmxChanged) // {artnet, sacn: rate or -1, perUniverse: {rate, sources, lost, dropped}}
+    Q_PROPERTY(QVariantList patchRows READ patch_rows NOTIFY changed)  // one row per fixture for the patch sheet
+    Q_PROPERTY(int conflictCount READ conflict_count NOTIFY changed)   // fixtures overlapping another
+    Q_PROPERTY(QString recoveryFile READ recovery_file NOTIFY changed) // newer autosave to offer, or empty
 
   public:
     explicit Session(QObject *parent); // no default: QML would construct its own instead of calling create()
@@ -50,6 +56,8 @@ class Session : public QObject {
     const sv::render::FixtureLibrary &library() const { return library_; }
     // Immutable copy for the render thread, replaced when a GDTF is added.
     std::shared_ptr<const sv::render::FixtureLibrary> library_snapshot() const { return library_snapshot_; }
+    // Set-piece meshes from the package's geometry/*.obj, immutable and replaced when geometry is added.
+    std::shared_ptr<const sv::render::MeshLibrary> meshes() const { return meshes_; }
     sv::proto::DmxEngine &dmx() { return dmx_; }
     const QImage &composition() const { return composition_; }
     const std::set<std::string> &selection() const { return selection_; }
@@ -63,6 +71,10 @@ class Session : public QObject {
     void preview_move(const std::string &uuid, QVector3D position);
     void commit_move();
     const std::vector<sv::proto::UniverseStatus> &status() const { return status_; }
+    // Per channel of a universe: 0 free, 1 patched, 2 claimed by two fixtures, 3 belongs to a selected fixture.
+    std::array<std::uint8_t, 512> occupancy(int universe) const;
+    std::filesystem::path autosave_target() const; // the project file, or an "Untitled" file in app data
+    void autosave();                               // writes the autosave if there are unsaved edits
 
     QString project_name() const { return name_; }
     QString file_path() const { return QString::fromStdString(path_.string()); }
@@ -76,13 +88,16 @@ class Session : public QObject {
     QVariantMap layout() const;
     QVariantList universes() const;
     QVariantMap dmx_status() const;
+    QVariantList patch_rows() const;
+    int conflict_count() const;
+    QString recovery_file() const { return recovery_; }
 
     Q_INVOKABLE QStringList modes(const QString &gdtf) const;
     Q_INVOKABLE void selectUuid(const QString &uuid, bool add); // empty uuid clears
     // Sets a field of an object by JSON pointer relative to the object, e.g. "/position/1".
     Q_INVOKABLE void edit(const QString &uuid, const QString &pointer, const QVariant &value);
     Q_INVOKABLE void setFixtureType(const QString &uuid, const QString &gdtf); // resets the mode to the first
-    Q_INVOKABLE bool setPatch(const QString &uuid, const QString &text);     // "universe.address", empty unpatches
+    Q_INVOKABLE bool setPatch(const QString &uuid, const QString &text);       // "universe.address", empty unpatches
     Q_INVOKABLE void addFixture(const QString &gdtf, const QString &mode);
     Q_INVOKABLE void addWall();
     Q_INVOKABLE void addTruss();
@@ -97,6 +112,16 @@ class Session : public QObject {
     Q_INVOKABLE QString openProject(const QUrl &url);
     Q_INVOKABLE QString saveProject(const QUrl &url); // empty url: save to the current file
     Q_INVOKABLE QString importGdtf(const QUrl &url);
+    // Patches the selected fixtures one after another in fixture ID order from "universe.address" (FR-8).
+    Q_INVOKABLE QString readdressSelection(const QString &start);
+    Q_INVOKABLE void selectUuids(const QStringList &uuids);
+    // kind: csv, ma3, resolume, obj (whole scene) or objSelection.
+    Q_INVOKABLE QString exportFile(const QString &kind, const QUrl &url);
+    Q_INVOKABLE QString importResolume(const QUrl &url);
+    // unit: m, cm, mm, in, ft. zUp rotates the file to Y-up. split: one set piece per OBJ group (FR-3).
+    Q_INVOKABLE QString importObj(const QUrl &url, const QString &unit, bool zUp, bool split);
+    Q_INVOKABLE QString recover();      // opens the autosave in place of the saved file, unsaved
+    Q_INVOKABLE void discardRecovery(); // deletes the autosave
 
   Q_SIGNALS:
     void changed();
@@ -108,10 +133,14 @@ class Session : public QObject {
     int index_of(const std::string &uuid) const;
     void add_object(sv::json object, const char *label);
     void add_gdtf(const std::string &name, std::vector<std::uint8_t> bytes); // throws on a bad file
+    void rebuild_meshes();
+    void check_recovery();
+    sv::Package package() const; // the document plus the GDTF types it uses and the other package files
+    void load(sv::Package pkg);
 
     QString name_;
     std::filesystem::path path_;
-    std::map<std::string, std::vector<std::uint8_t>> gdtf_files_; // by file name, written back into saved packages
+    std::map<std::string, std::vector<std::uint8_t>> gdtf_files_;  // by file name, written back into saved packages
     std::map<std::string, std::vector<std::uint8_t>> other_files_; // package entries kept as they are
 
     sv::Document document_;
@@ -119,6 +148,9 @@ class Session : public QObject {
     sv::render::FixtureLibrary library_;
     std::shared_ptr<const sv::render::FixtureLibrary> library_snapshot_;
     bool library_dirty_ = true;
+    std::shared_ptr<const sv::render::MeshLibrary> meshes_ = std::make_shared<sv::render::MeshLibrary>();
+    QString recovery_;
+    QTimer autosave_timer_;
     sv::proto::DmxEngine dmx_;
     sv::proto::Pattern pattern_ = sv::proto::Pattern::off;
     QImage composition_;

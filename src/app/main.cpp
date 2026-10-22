@@ -1,11 +1,50 @@
 #include "session.h"
 
 #include <QCommandLineParser>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
 #include <QGuiApplication>
+#include <QMutex>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QStandardPaths>
 #include <QTimer>
+
+namespace {
+// Every Qt message also goes to AppDataLocation/logs/scene-visualiser.log, rotated at launch with three kept.
+// Plain Qt instead of spdlog (plan M6): one handler and a file, not worth a dependency.
+QFile log_file;
+QMutex log_mutex;
+QtMessageHandler default_handler = nullptr;
+
+void log_message(QtMsgType type, const QMessageLogContext &context, const QString &message) {
+    static const char *levels[] = {"debug", "warning", "critical", "fatal", "info"};
+    {
+        QMutexLocker lock(&log_mutex);
+        if (log_file.isOpen()) {
+            log_file.write(QStringLiteral("%1 %2 %3\n")
+                               .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs), levels[type], message)
+                               .toUtf8());
+            log_file.flush();
+        }
+    }
+    default_handler(type, context, message);
+}
+
+void open_log() {
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/logs";
+    QDir().mkpath(dir);
+    const auto name = [&](int i) { return dir + "/scene-visualiser.log" + (i ? "." + QString::number(i) : ""); };
+    QFile::remove(name(3));
+    for (int i = 2; i >= 0; --i)
+        QFile::rename(name(i), name(i + 1));
+    log_file.setFileName(name(0));
+    if (log_file.open(QIODevice::WriteOnly | QIODevice::Text))
+        default_handler = qInstallMessageHandler(log_message);
+}
+} // namespace
 
 int main(int argc, char *argv[]) {
     // Same render loop on every OS, so Linux dev builds exercise the render-thread code paths.
@@ -16,6 +55,7 @@ int main(int argc, char *argv[]) {
     QGuiApplication::setApplicationName("Scene Visualiser");
     QGuiApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     QQuickStyle::setStyle("Fusion");
+    open_log();
 
     QCommandLineParser args;
     args.addHelpOption();
@@ -25,6 +65,8 @@ int main(int argc, char *argv[]) {
     QCommandLineOption generator("generator", "Run an internal test pattern: off, full, chase, rainbow, sweep.",
                                  "pattern", "off");
     args.addOption(generator);
+    QCommandLineOption screen("screen", "Start on a screen: design, patch, dmx, project.", "name", "design");
+    args.addOption(screen);
     args.addPositionalArgument("project", "A .svproj file to open; the demo rig when omitted.");
     args.process(app);
 
@@ -50,6 +92,8 @@ int main(int argc, char *argv[]) {
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
         Qt::QueuedConnection);
     engine.loadFromModule("SceneVisualiser", "Main");
+    if (!engine.rootObjects().isEmpty())
+        engine.rootObjects().first()->setProperty("screen", args.value(screen));
 
     if (args.isSet(shot) && !engine.rootObjects().isEmpty()) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());

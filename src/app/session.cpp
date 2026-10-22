@@ -1,6 +1,6 @@
 #include "session.h"
 
-#include "core/project_file.h"
+#include "core/interchange.h"
 #include "render/test_pattern.h"
 
 #include <QDir>
@@ -10,7 +10,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QSaveFile>
+#include <QStandardPaths>
 #include <algorithm>
+#include <climits>
 
 Q_LOGGING_CATEGORY(lcSession, "sv.session")
 
@@ -39,6 +42,22 @@ QString patch_text(const json &patch) {
 }
 
 QString number(double v) { return QString::number(v, 'g', 4); }
+
+std::optional<std::pair<int, int>> parse_patch(const QString &text) {
+    const QStringList parts = text.trimmed().split('.');
+    bool ok_u = false, ok_a = parts.size() == 2;
+    const int u = parts.value(0).toInt(&ok_u), a = parts.value(1).toInt(&ok_a);
+    if (!ok_u || !ok_a || u < 1 || u > 63999 || a < 1 || a > 512)
+        return std::nullopt;
+    return std::pair{u, a};
+}
+
+QByteArray read_file(const QUrl &url, QString &error) {
+    QFile f(url.toLocalFile());
+    if (!f.open(QIODevice::ReadOnly))
+        error = QObject::tr("Cannot read %1").arg(f.fileName());
+    return f.readAll();
+}
 
 int next_fixture_id(const json &objects) {
     int id = 100;
@@ -85,6 +104,9 @@ Session::Session(QObject *parent) : QObject(parent) {
         Q_EMIT dmxChanged();
     });
     status_timer_.start();
+    autosave_timer_.setInterval(2 * 60 * 1000); // AT-6: at most 2 minutes of lost work
+    connect(&autosave_timer_, &QTimer::timeout, this, &Session::autosave);
+    autosave_timer_.start();
 }
 
 Session::~Session() {
@@ -103,6 +125,7 @@ void Session::set_project(sv::json project, QString name) {
     name_ = std::move(name);
     document_ = sv::Document(std::move(project));
     selection_.clear();
+    check_recovery();
     refresh();
 }
 
@@ -274,7 +297,10 @@ QVariantMap Session::dmx_status() const {
                 artnet = std::max(artnet, st.rate_hz);
             else if (id.starts_with("sacn:"))
                 sacn = std::max(sacn, st.rate_hz);
-        per[QString::number(st.universe)] = QVariantMap{{"rate", st.rate_hz}, {"sources", sources}};
+        per[QString::number(st.universe)] = QVariantMap{{"rate", st.rate_hz},
+                                                        {"sources", sources},
+                                                        {"lost", qulonglong(st.lost)},
+                                                        {"dropped", qulonglong(st.dropped)}};
     }
     return {{"artnet", artnet}, {"sacn", sacn}, {"perUniverse", per}};
 }
@@ -318,15 +344,14 @@ bool Session::setPatch(const QString &uuid, const QString &text) {
         return false;
     json value = nullptr;
     if (!text.trimmed().isEmpty()) {
-        const QStringList parts = text.trimmed().split('.');
-        bool ok_u = false, ok_a = parts.size() == 2;
-        const int u = parts.value(0).toInt(&ok_u), a = parts.value(1).toInt(&ok_a);
-        if (!ok_u || !ok_a || u < 1 || u > 63999 || a < 1 || a > 512)
+        const auto p = parse_patch(text);
+        if (!p)
             return false;
-        value = {{"universe", u}, {"address", a}};
+        value = {{"universe", p->first}, {"address", p->second}};
     }
-    return apply(json::array({{{"op", "replace"}, {"path", "/objects/" + std::to_string(i) + "/patch"}, {"value", value}}}),
-                 "Patch");
+    return apply(
+        json::array({{{"op", "replace"}, {"path", "/objects/" + std::to_string(i) + "/patch"}, {"value", value}}}),
+        "Patch");
 }
 
 void Session::add_object(json object, const char *label) {
@@ -435,30 +460,45 @@ void Session::add_gdtf(const std::string &name, std::vector<std::uint8_t> bytes)
 void Session::newProject() {
     path_.clear();
     other_files_.clear();
+    rebuild_meshes();
     set_project(sv::new_project());
+}
+
+void Session::load(sv::Package pkg) {
+    other_files_.clear();
+    for (auto &[entry, bytes] : pkg.files)
+        if (entry.starts_with("gdtf/")) {
+            try {
+                add_gdtf(entry.substr(5), std::move(bytes));
+            } catch (const std::exception &e) {
+                qCWarning(lcSession) << "GDTF" << entry.c_str() << "in package failed:" << e.what();
+            }
+        } else {
+            other_files_[entry] = std::move(bytes);
+        }
+    rebuild_meshes();
+    set_project(std::move(pkg.project),
+                path_.empty() ? QStringLiteral("Untitled") : QString::fromStdU16String(path_.stem().u16string()));
 }
 
 QString Session::openProject(const QUrl &url) {
     const std::filesystem::path path = url.toLocalFile().toStdU16String();
     try {
         sv::Package pkg = sv::load_package(path);
-        other_files_.clear();
-        for (auto &[entry, bytes] : pkg.files)
-            if (entry.starts_with("gdtf/")) {
-                try {
-                    add_gdtf(entry.substr(5), std::move(bytes));
-                } catch (const std::exception &e) {
-                    qCWarning(lcSession) << "GDTF" << entry.c_str() << "in package failed:" << e.what();
-                }
-            } else {
-                other_files_[entry] = std::move(bytes);
-            }
         path_ = path;
-        set_project(std::move(pkg.project), QString::fromStdU16String(path.stem().u16string()));
+        load(std::move(pkg));
     } catch (const std::exception &e) {
         return QString::fromUtf8(e.what());
     }
     return {};
+}
+
+sv::Package Session::package() const {
+    sv::Package pkg{document_.data(), other_files_};
+    for (const json &o : document_.data().at("objects")) // only the types the rig uses travel with it
+        if (const auto it = gdtf_files_.find(o.value("gdtf", std::string())); it != gdtf_files_.end())
+            pkg.files["gdtf/" + it->first] = it->second;
+    return pkg;
 }
 
 QString Session::saveProject(const QUrl &url) {
@@ -467,18 +507,17 @@ QString Session::saveProject(const QUrl &url) {
         return tr("No file chosen");
     if (path.extension() != ".svproj")
         path += ".svproj";
-    sv::Package pkg{document_.data(), other_files_};
-    for (const json &o : document_.data().at("objects")) // only the types the rig uses travel with it
-        if (const auto it = gdtf_files_.find(o.value("gdtf", std::string())); it != gdtf_files_.end())
-            pkg.files["gdtf/" + it->first] = it->second;
     try {
-        sv::save_package(path, pkg);
+        sv::save_package(path, package());
+        if (path_.empty()) // the untitled autosave is superseded by the real file
+            std::filesystem::remove(sv::autosave_path(autosave_target()));
     } catch (const std::exception &e) {
         return QString::fromUtf8(e.what());
     }
     document_.mark_saved();
     path_ = path;
     name_ = QString::fromStdU16String(path.stem().u16string());
+    recovery_.clear();
     Q_EMIT changed();
     return {};
 }
@@ -495,4 +534,266 @@ QString Session::importGdtf(const QUrl &url) {
     }
     refresh(); // fixtures of this type re-decode with the new definition
     return {};
+}
+
+std::array<std::uint8_t, 512> Session::occupancy(int universe) const {
+    std::array<std::uint8_t, 512> out{};
+    for (const json &o : document_.data().at("objects")) {
+        const json &p = o.value("patch", json());
+        if (!p.is_object() || p.value("universe", 1) != universe)
+            continue;
+        const bool sel = selection_.contains(o.value("uuid", std::string()));
+        const int a = p.value("address", 1), fp = std::max(1, footprint(library_, o));
+        for (int c = std::max(a, 1); c < std::min(a + fp, 513); ++c) {
+            std::uint8_t &slot = out[std::size_t(c - 1)];
+            slot = sel ? 3 : slot ? 2 : 1;
+        }
+    }
+    return out;
+}
+
+int Session::conflict_count() const {
+    int n = 0;
+    for (const QVariant &row : patch_rows())
+        n += row.toMap().value("conflict").toBool();
+    return n;
+}
+
+QVariantList Session::patch_rows() const {
+    // Channel owners per universe, to flag fixtures whose range overlaps another's.
+    std::map<int, std::array<int, 512>> claims;
+    const json &objects = document_.data().at("objects");
+    for (const json &o : objects)
+        if (const json &p = o.value("patch", json()); p.is_object()) {
+            auto &c = claims.try_emplace(p.value("universe", 1), std::array<int, 512>{}).first->second;
+            const int a = p.value("address", 1), fp = std::max(1, footprint(library_, o));
+            for (int ch = std::max(a, 1); ch < std::min(a + fp, 513); ++ch)
+                ++c[std::size_t(ch - 1)];
+        }
+    QVariantList out;
+    for (const json &o : objects) {
+        if (o.value("type", std::string()) != "fixture")
+            continue;
+        const json &p = o.value("patch", json());
+        const int fp = footprint(library_, o);
+        bool conflict = false;
+        if (p.is_object()) {
+            const auto &c = claims[p.value("universe", 1)];
+            const int a = p.value("address", 1);
+            for (int ch = std::max(a, 1); ch < std::min(a + std::max(fp, 1), 513); ++ch)
+                conflict |= c[std::size_t(ch - 1)] > 1;
+        }
+        const auto type = library_.find(o.value("gdtf", std::string()));
+        const json &id = o.value("fixtureId", json());
+        const std::string uuid = o.value("uuid", std::string());
+        out.push_back(QVariantMap{
+            {"uuid", QString::fromStdString(uuid)},
+            {"fixtureId", id.is_number_integer() ? QVariant(id.get<int>()) : QVariant()},
+            {"name", QString::fromStdString(o.value("name", std::string()))},
+            {"type",
+             QString::fromStdString(type == library_.end() ? o.value("gdtf", std::string()) : type->second.name)},
+            {"mode", QString::fromStdString(o.value("mode", std::string()))},
+            {"universe", p.is_object() ? QVariant(p.value("universe", 1)) : QVariant()},
+            {"address", p.is_object() ? QVariant(p.value("address", 1)) : QVariant()},
+            {"patch", patch_text(p)},
+            {"footprint", fp},
+            {"position", to_variant(o.value("position", json::array()))},
+            {"conflict", conflict},
+            {"overflow", p.is_object() && p.value("address", 1) + fp - 1 > 512},
+            {"selected", selection_.contains(uuid)}});
+    }
+    return out;
+}
+
+void Session::selectUuids(const QStringList &uuids) {
+    selection_.clear();
+    for (const QString &u : uuids)
+        selection_.insert(u.toStdString());
+    ++revision_;
+    Q_EMIT changed();
+}
+
+QString Session::readdressSelection(const QString &start) {
+    const auto first = parse_patch(start);
+    if (!first)
+        return tr("Use universe.address, e.g. 2.001");
+    const json &objects = document_.data().at("objects");
+    std::vector<std::pair<int, std::size_t>> order; // fixture ID (unnumbered last), object index
+    for (std::size_t i = 0; i < objects.size(); ++i)
+        if (objects[i].value("type", std::string()) == "fixture" &&
+            selection_.contains(objects[i].value("uuid", std::string()))) {
+            const json &id = objects[i].value("fixtureId", json());
+            order.emplace_back(id.is_number_integer() ? id.get<int>() : INT_MAX, i);
+        }
+    if (order.empty())
+        return tr("Select fixtures first");
+    std::ranges::stable_sort(order, {}, &std::pair<int, std::size_t>::first);
+    auto [u, a] = *first;
+    json patch = json::array();
+    for (const auto &[id, i] : order) {
+        const int fp = std::max(1, footprint(library_, objects[i]));
+        if (a + fp - 1 > 512)
+            ++u, a = 1;
+        patch.push_back({{"op", "replace"},
+                         {"path", "/objects/" + std::to_string(i) + "/patch"},
+                         {"value", {{"universe", u}, {"address", a}}}});
+        a += fp;
+    }
+    apply(patch, "Re-address");
+    return {};
+}
+
+QString Session::exportFile(const QString &kind, const QUrl &url) {
+    std::string text;
+    try {
+        if (kind == "csv")
+            text = sv::patch_csv(document_.data());
+        else if (kind == "ma3")
+            text = sv::ma3_patch_xml(document_.data());
+        else if (kind == "resolume")
+            text = sv::resolume_xml(document_.data());
+        else if (kind == "obj" || kind == "objSelection") {
+            if (kind == "objSelection" && selection_.empty())
+                return tr("Select objects first");
+            text = sv::render::export_obj(document_.data(), library_, *meshes_,
+                                          kind == "obj" ? std::set<std::string>() : selection_);
+        } else
+            return tr("Unknown export %1").arg(kind);
+    } catch (const std::exception &e) {
+        return QString::fromUtf8(e.what());
+    }
+    QSaveFile f(url.toLocalFile());
+    if (!f.open(QIODevice::WriteOnly) || f.write(text.data(), qint64(text.size())) != qint64(text.size()) ||
+        !f.commit())
+        return tr("Cannot write %1: %2").arg(url.toLocalFile(), f.errorString());
+    return {};
+}
+
+QString Session::importResolume(const QUrl &url) {
+    QString error;
+    const QByteArray xml = read_file(url, error);
+    if (!error.isEmpty())
+        return error;
+    try {
+        apply(sv::resolume_import_patch(document_.data(), {xml.constData(), std::size_t(xml.size())}),
+              "Import Resolume");
+    } catch (const std::exception &e) {
+        return QString::fromUtf8(e.what());
+    }
+    return {};
+}
+
+QString Session::importObj(const QUrl &url, const QString &unit, bool zUp, bool split) {
+    QString error;
+    const QByteArray bytes = read_file(url, error);
+    if (!error.isEmpty())
+        return error;
+    std::vector<sv::ObjGroup> groups;
+    try {
+        groups = sv::parse_obj({bytes.constData(), std::size_t(bytes.size())});
+    } catch (const std::exception &e) {
+        return QString::fromUtf8(e.what());
+    }
+    // Copied into the package; a different file with the same name gets a numbered entry.
+    const QFileInfo info(url.toLocalFile());
+    std::string entry = "geometry/" + info.fileName().toStdString();
+    for (int n = 2;
+         other_files_.contains(entry) && other_files_[entry] != std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+         ++n)
+        entry = "geometry/" + info.completeBaseName().toStdString() + "-" + std::to_string(n) + ".obj";
+    other_files_[entry] = {bytes.begin(), bytes.end()};
+    rebuild_meshes();
+
+    const double scale = sv::unit_scale(unit.toStdString());
+    json patch = json::array();
+    std::set<std::string> added;
+    const auto piece = [&](const std::string &name, const std::string &group) {
+        json o = sv::new_set_piece(name, entry);
+        if (!group.empty())
+            o["group"] = group;
+        o["scale"] = {scale, scale, scale};
+        if (zUp)
+            o["rotation"] = {-90.0, 0.0, 0.0};
+        added.insert(o["uuid"].get<std::string>());
+        patch.push_back({{"op", "add"}, {"path", "/objects/-"}, {"value", std::move(o)}});
+    };
+    if (split && groups.size() > 1)
+        for (const sv::ObjGroup &g : groups)
+            piece(g.name, g.name);
+    else
+        piece(info.completeBaseName().toStdString(), {});
+    if (apply(patch, "Import OBJ")) {
+        selection_ = added;
+        refresh();
+    }
+    return {};
+}
+
+void Session::rebuild_meshes() {
+    auto lib = std::make_shared<sv::render::MeshLibrary>();
+    for (const auto &[entry, bytes] : other_files_) {
+        if (!entry.starts_with("geometry/") || !QString::fromStdString(entry).endsWith(".obj", Qt::CaseInsensitive))
+            continue;
+        try {
+            std::vector<float> all;
+            for (sv::ObjGroup &g : sv::parse_obj({reinterpret_cast<const char *>(bytes.data()), bytes.size()})) {
+                all.insert(all.end(), g.vertices.begin(), g.vertices.end());
+                (*lib)[entry + "#" + g.name] = sv::render::make_mesh(std::move(g.vertices));
+            }
+            (*lib)[entry] = sv::render::make_mesh(std::move(all));
+        } catch (const std::exception &e) {
+            qCWarning(lcSession) << "geometry" << entry.c_str() << "failed:" << e.what();
+        }
+    }
+    meshes_ = std::move(lib);
+}
+
+std::filesystem::path Session::autosave_target() const {
+    if (!path_.empty())
+        return path_;
+    return std::filesystem::path(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation).toStdU16String()) /
+           "Untitled.svproj";
+}
+
+void Session::autosave() {
+    if (!document_.dirty())
+        return;
+    const std::filesystem::path target = autosave_target();
+    try {
+        std::filesystem::create_directories(target.parent_path());
+        sv::write_autosave(target, package());
+    } catch (const std::exception &e) {
+        qCWarning(lcSession) << "autosave failed:" << e.what();
+    }
+}
+
+void Session::check_recovery() {
+    const std::filesystem::path target = autosave_target();
+    std::error_code ec;
+    // An untitled autosave has no saved file to compare with, so any one left behind is newer.
+    const bool newer =
+        path_.empty() ? std::filesystem::exists(sv::autosave_path(target), ec) : sv::has_newer_autosave(target);
+    recovery_ = newer ? QString::fromStdU16String(sv::autosave_path(target).u16string()) : QString();
+}
+
+QString Session::recover() {
+    if (recovery_.isEmpty())
+        return tr("Nothing to recover");
+    try {
+        sv::Package pkg = sv::load_package(recovery_.toStdU16String());
+        load(std::move(pkg)); // keeps path_, so the next save replaces the real file
+    } catch (const std::exception &e) {
+        return QString::fromUtf8(e.what());
+    }
+    recovery_.clear(); // load() re-checked, but the user has chosen; the file goes on the next save
+    document_.mark_unsaved();
+    Q_EMIT changed();
+    return {};
+}
+
+void Session::discardRecovery() {
+    std::error_code ec;
+    std::filesystem::remove(recovery_.toStdU16String(), ec);
+    recovery_.clear();
+    Q_EMIT changed();
 }

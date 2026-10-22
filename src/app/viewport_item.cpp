@@ -21,6 +21,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
             revision = s->revision();
             project = s->snapshot();
             library = s->library_snapshot();
+            meshes = s->meshes();
             selection = s->selection();
             scene.set_composition(s->composition());
             buffers.clear();
@@ -43,7 +44,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
                 return it == buffers.end() ? std::span<const std::uint8_t>()
                                            : std::span<const std::uint8_t>(it->second->front().data);
             });
-            scene.set_scene(sv::render::build_scene(*project, fixtures, selection, time));
+            scene.set_scene(sv::render::build_scene(*project, fixtures, selection, time, *meshes));
         }
         scene.render(cb, renderTarget());
     }
@@ -52,6 +53,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
     quint64 revision = ~0ull;
     std::shared_ptr<const sv::json> project;
     std::shared_ptr<const sv::render::FixtureLibrary> library;
+    std::shared_ptr<const sv::render::MeshLibrary> meshes;
     std::set<std::string> selection;
     std::map<std::uint16_t, sv::proto::TripleBuffer<sv::proto::UniverseFrame> *> buffers;
     double time = 0;
@@ -82,11 +84,11 @@ std::optional<QVector3D> ViewportItem::on_plane(QPointF p, float y) const {
 namespace {
 std::optional<std::string> pick_at(const sv::render::OrbitCamera &camera, QPointF p, QSizeF size) {
     Session *s = Session::instance();
-    const auto [origin, dir] = camera.ray(float(p.x() / size.width()), float(p.y() / size.height()),
-                                          float(size.width() / size.height()));
+    const auto [origin, dir] =
+        camera.ray(float(p.x() / size.width()), float(p.y() / size.height()), float(size.width() / size.height()));
     const auto blank = [](std::uint16_t) { return std::span<const std::uint8_t>(); };
     const auto fixtures = sv::render::decode_fixtures(*s->snapshot(), s->library(), blank);
-    return sv::render::pick(sv::render::build_scene(*s->snapshot(), fixtures, {}, 0), origin, dir);
+    return sv::render::pick(sv::render::build_scene(*s->snapshot(), fixtures, {}, 0, *s->meshes()), origin, dir);
 }
 } // namespace
 

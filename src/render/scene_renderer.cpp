@@ -3,6 +3,7 @@
 #include <QFile>
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numbers>
 #include <rhi/qrhi.h>
 
@@ -77,8 +78,11 @@ struct SceneRenderer::Gpu {
     std::unique_ptr<QRhiTexture> texture;
     std::unique_ptr<QRhiSampler> sampler;
     std::unique_ptr<QRhiShaderResourceBindings> srb;
-    std::unique_ptr<QRhiGraphicsPipeline> grid, mesh, wall, beam;
+    std::unique_ptr<QRhiGraphicsPipeline> grid, mesh, piece, wall, beam;
     int cone_count = 0;
+    std::unique_ptr<QRhiBuffer> piece_instances;
+    // Set-piece vertex buffers, uploaded once per mesh and dropped when no longer in the scene.
+    std::map<std::shared_ptr<const Mesh>, std::unique_ptr<QRhiBuffer>> pieces;
 
     std::unique_ptr<QRhiBuffer> immutable(QRhiResourceUpdateBatch *u, const std::vector<Vertex> &v) {
         std::unique_ptr<QRhiBuffer> b(
@@ -145,6 +149,10 @@ struct SceneRenderer::Gpu {
         mesh =
             pipeline(rp, "mesh", {mesh_vertex, B(80, B::PerInstance)},
                      {pos, normal, m[0], m[1], m[2], m[3], A(1, 6, A::Float4, 64)}, QRhiGraphicsPipeline::Back, false);
+        // Imported OBJ winding is not reliable, so set pieces are drawn double-sided.
+        piece =
+            pipeline(rp, "mesh", {mesh_vertex, B(80, B::PerInstance)},
+                     {pos, normal, m[0], m[1], m[2], m[3], A(1, 6, A::Float4, 64)}, QRhiGraphicsPipeline::None, false);
         wall = pipeline(rp, "wall", {mesh_vertex, B(112, B::PerInstance)},
                         {pos, normal, m[0], m[1], m[2], m[3], A(1, 6, A::Float4, 64), A(1, 7, A::Float4, 80),
                          A(1, 8, A::Float4, 96)},
@@ -250,6 +258,24 @@ void SceneRenderer::render(QRhiCommandBuffer *cb, QRhiRenderTarget *rt) {
         g.stream(u, g.boxes, boxes);
         g.stream(u, g.walls, walls);
         g.stream(u, g.beams, beams);
+        std::vector<float> pieces;
+        std::erase_if(g.pieces, [&](const auto &e) {
+            return std::ranges::none_of(scene.meshes, [&](const MeshInstance &m) { return m.mesh == e.first; });
+        });
+        for (const auto &m : scene.meshes) {
+            pieces.resize(pieces.size() + 20);
+            float *p = pieces.data() + pieces.size() - 20;
+            put(p, m.model);
+            std::copy_n(std::array{m.colour.x(), m.colour.y(), m.colour.z(), m.colour.w()}.data(), 4, p + 16);
+            auto &buf = g.pieces[m.mesh];
+            if (!buf && !m.mesh->vertices.empty()) {
+                buf.reset(rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer,
+                                         quint32(m.mesh->vertices.size() * sizeof(float))));
+                buf->create();
+                u->uploadStaticBuffer(buf.get(), m.mesh->vertices.data());
+            }
+        }
+        g.stream(u, g.piece_instances, pieces);
         scene_dirty = false;
     }
 
@@ -289,6 +315,14 @@ void SceneRenderer::render(QRhiCommandBuffer *cb, QRhiRenderTarget *rt) {
     };
     draw(g.grid.get(), g.quad.get(), 6, nullptr, 1);
     draw(g.mesh.get(), g.cube.get(), 36, g.boxes.get(), scene.boxes.size());
+    for (std::size_t i = 0; i < scene.meshes.size(); ++i) // one draw per piece; the instance offset picks its matrix
+        if (const auto &buf = g.pieces[scene.meshes[i].mesh]) {
+            cb->setGraphicsPipeline(g.piece.get());
+            cb->setShaderResources();
+            const QRhiCommandBuffer::VertexInput in[] = {{buf.get(), 0}, {g.piece_instances.get(), quint32(i * 80)}};
+            cb->setVertexInput(0, 2, in);
+            cb->draw(quint32(scene.meshes[i].mesh->vertices.size() / 6));
+        }
     draw(g.wall.get(), g.quad.get(), 6, g.walls.get(), scene.walls.size());
     draw(g.beam.get(), g.cone.get(), quint32(g.cone_count), g.beams.get(), scene.beams.size());
     cb->endPass();

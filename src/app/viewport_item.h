@@ -24,7 +24,7 @@ class ViewportItem : public QQuickRhiItem {
 
     QString view() const { return view_; }
     Q_INVOKABLE void setPreset(const QString &name); // Perspective, Top, Front, Side
-    Q_INVOKABLE QVariantMap cameraState() const;    // for bookmarks in the project layout
+    Q_INVOKABLE QVariantMap cameraState() const;     // for bookmarks in the project layout
     Q_INVOKABLE void setCameraState(const QVariantMap &state);
 
     sv::render::OrbitCamera camera;
