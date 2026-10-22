@@ -89,6 +89,55 @@ json new_camera(std::string name) {
     return o;
 }
 
+json demo_project() {
+    json p = new_project();
+    p["venue"]["width"] = 16.0, p["venue"]["depth"] = 12.0;
+    json deck = new_deck(10, 6, 1);
+    p["venue"]["decks"].push_back(deck);
+    auto &objects = p["objects"];
+    auto truss = [&](const char *name, double z) {
+        json t = new_truss(name, "straight", 10);
+        t["position"] = {0.0, 6.5, z};
+        objects.push_back(t);
+    };
+    truss("Front truss", 1.5);
+    truss("Back truss", -2.5);
+    int address = 1, id = 101;
+    // Footprints of the bundled generic types (resources/gdtf), all in mode "Default".
+    auto put = [&](const char *gdtf, const char *name, int footprint, double x, double y, double z, double tilt) {
+        json f = new_fixture(name, gdtf, "Default");
+        f["position"] = {std::round(x * 100) / 100, y, z};
+        f["rotation"] = {tilt, 0.0, 0.0};
+        f["fixtureId"] = id++;
+        f["patch"] = {{"universe", 1}, {"address", address}};
+        address += footprint;
+        objects.push_back(f);
+    };
+    for (int i = 0; i < 6; ++i)
+        put("Generic@Spot_7ch.gdtf", "Spot", 7, -4.5 + i * 1.8, 6.2, -2.5, 0);
+    for (int i = 0; i < 6; ++i)
+        put("Generic@Wash_RGBW.gdtf", "Wash", 5, -4.5 + i * 1.8, 6.3, 1.5,
+            35); // +X rotation aims the beam upstage (-Z)
+    for (int i = 0; i < 4; ++i)
+        put("Generic@Beam_5ch.gdtf", "Beam", 5, -3 + i * 2, 1.5, -2.9, 180); // floor-standing, pointing up
+    for (int i = 0; i < 2; ++i)
+        put("Generic@Blinder.gdtf", "Blinder", 1, -2 + i * 4, 6.6, 1.5, -70);
+    put("Generic@Pixel_Bar_8.gdtf", "Pixel bar", 25, 0, 1.15, -2.6, 0);
+    objects.back()["rotation"] = {180.0, 0.0, 0.0};
+    auto wall = [&](const char *name, double w, double h, double x, double z, double pan, int sx, int sw) {
+        json o = new_led_wall(name);
+        o["width"] = w, o["height"] = h;
+        o["position"] = {x, 1.0, z};
+        o["rotation"] = {0.0, pan, 0.0};
+        o["slice"] = {{"x", sx}, {"y", 0}, {"w", sw}, {"h", 1080}};
+        objects.push_back(o);
+    };
+    wall("Centre wall", 6, 3.5, 0, -2.7, 0, 0, 1280);
+    wall("SR pillar", 1.5, 4, -5, -1.5, 30, 1280, 320);
+    wall("SL pillar", 1.5, 4, 5, -1.5, -30, 1600, 320);
+    return p;
+}
+
 WallDerived wall_derived(const json &wall) {
     const double w = wall.at("width"), h = wall.at("height"), pitch_m = wall.at("pixelPitch").get<double>() / 1000.0;
     const auto count = [](double size, double step) { return step > 0 ? int(std::lround(size / step)) : 0; };

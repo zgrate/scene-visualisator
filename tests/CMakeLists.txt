@@ -2,3 +2,16 @@ add_executable(sv_tests core_tests.cpp document_tests.cpp project_file_tests.cpp
 target_link_libraries(sv_tests PRIVATE Catch2::Catch2WithMain sv_core sv_gdtf sv_proto sv_render asio)
 catch_discover_tests(sv_tests)
 target_compile_definitions(sv_tests PRIVATE SV_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
+add_executable(sv_render_golden render_golden.cpp)
+target_link_libraries(sv_render_golden PRIVATE sv_render Qt6::Gui)
+target_compile_definitions(sv_render_golden PRIVATE SV_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+# Pixel comparison only on Linux/llvmpipe, where the golden was made; other OSes just render and save the PNG.
+find_program(XVFB_RUN xvfb-run)
+if(UNIX AND NOT APPLE AND XVFB_RUN)
+    add_test(NAME render_golden COMMAND ${XVFB_RUN} -a $<TARGET_FILE:sv_render_golden> ${PROJECT_SOURCE_DIR}/tests/golden/demo.png)
+    set_tests_properties(render_golden PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
+else()
+    add_test(NAME render_golden COMMAND sv_render_golden ${PROJECT_SOURCE_DIR}/tests/golden/demo.png --no-compare)
+endif()
+set_property(TEST render_golden PROPERTY SKIP_RETURN_CODE 77)

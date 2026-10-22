@@ -38,16 +38,18 @@ jobs:
       # Render smoke: real window, real RHI backend (OpenGL/llvmpipe, D3D on WARP, Metal), saved as PNG.
       - name: Smoke screenshot (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a -s "-screen 0 1600x1000x24" ${{ matrix.app }} --screenshot smoke-${{ runner.os }}.png
+        run: xvfb-run -a -s "-screen 0 1600x1000x24" ${{ matrix.app }} --screenshot smoke-${{ runner.os }}.png --generator rainbow
       - name: Smoke screenshot (Windows/macOS)
         if: runner.os != 'Linux'
         shell: bash
         env:
           QSG_RHI_PREFER_SOFTWARE_RENDERER: '1'
-        run: ${{ matrix.app }} --screenshot smoke-${{ runner.os }}.png
+        run: ${{ matrix.app }} --screenshot smoke-${{ runner.os }}.png --generator rainbow
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: smoke-${{ runner.os }}
-          path: smoke-*.png
+          path: |
+            smoke-*.png
+            build/*/tests/render_golden_actual.png
           if-no-files-found: warn

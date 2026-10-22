@@ -1,3 +1,5 @@
+#include "session.h"
+
 #include <QCommandLineParser>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -20,7 +22,22 @@ int main(int argc, char *argv[]) {
     args.addVersionOption();
     QCommandLineOption shot("screenshot", "Save the window to <png> after the first frames, then exit.", "png");
     args.addOption(shot);
+    QCommandLineOption generator("generator", "Run an internal test pattern: off, full, chase, rainbow, sweep.",
+                                 "pattern", "off");
+    args.addOption(generator);
     args.process(app);
+
+    Session session;
+    // shortcut: always opens the demo rig until File > Open lands (M5).
+    session.set_project(sv::demo_project());
+    session.start_dmx();
+    static const std::map<QString, sv::proto::Pattern> patterns{{"off", sv::proto::Pattern::off},
+                                                                {"full", sv::proto::Pattern::full},
+                                                                {"chase", sv::proto::Pattern::chase},
+                                                                {"rainbow", sv::proto::Pattern::rainbow},
+                                                                {"sweep", sv::proto::Pattern::sweep}};
+    if (auto it = patterns.find(args.value(generator)); it != patterns.end())
+        session.set_generator(it->second);
 
     QQmlApplicationEngine engine;
     QObject::connect(

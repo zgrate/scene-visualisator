@@ -22,6 +22,9 @@ json new_truss(std::string name, std::string truss_type = "straight", double len
 json new_set_piece(std::string name, std::string geometry_file);
 json new_camera(std::string name);
 
+// The POC demo rig: a stage deck, 2 trusses, 19 fixtures of the bundled generic types on universe 1, 3 LED walls.
+json demo_project();
+
 // FR-7 derived values of an LED wall.
 struct WallDerived {
     int pixels_x, pixels_y;   // native resolution
