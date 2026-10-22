@@ -51,9 +51,13 @@ int main(int argc, char *argv[]) {
     if (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP"))
         qputenv("QSG_RENDER_LOOP", "threaded");
 
+#ifdef Q_OS_WIN
+    // B1: Spout shares D3D11 textures; pin Qt's default so a sender opens straight into our device.
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);
+#endif
     QGuiApplication app(argc, argv);
     QGuiApplication::setApplicationName("Scene Visualiser");
-    QGuiApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QGuiApplication::setApplicationVersion(QStringLiteral("0.2.0"));
     QQuickStyle::setStyle("Fusion");
     open_log();
 

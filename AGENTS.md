@@ -6,7 +6,9 @@ and sACN, decodes fixtures from GDTF, and renders beams and walls on the GPU. It
 - **Spec:** https://artifacts.zgrate.ovh/a/KGhqn7zy8Lwo. The local source is
   `.artifacts/fragments/scene-visualiser/body.html` (product docs: FR/NFR, protocols, `.svproj`, acceptance tests,
   roadmap) and `mockups.html` (design 2, "Studio").
-- **Current target:** the roadmap's **Alpha** row, with the Studio design in a **dark** palette.
+- **Current target:** the roadmap's **Beta** row (alpha shipped as M0–M6), Studio design, **dark** palette.
+  The Beta plan (milestones B0–B8, decisions B1–B12) is `docs/beta-plan.md`; its ground truth for Resolume is the
+  user's Arena 7.17 file in `tests/fixtures/resolume/`.
 - **The POC's JavaScript is not product code.** Use `app.js` only as a behaviour reference.
 - **The full plan** (milestones M0–M6) is in `docs/alpha-plan.md`.
 
@@ -144,11 +146,15 @@ Hard rules:
 - **D6:** built-in meshes for fixtures, trusses and walls. OBJ import produces static set pieces.
 - **D7:** Qt Quick/QML, not Widgets.
 
-## 9. Deferred (Beta/Release, do not build in alpha)
-- **Media and formats:** Spout, Syphon and NDI in or out, live composition, FBX, MVR.
-- **Views:** plan/elevation and the mapping view.
-- **Distribution:** signed installers and updaters.
-- **Rendering:** shadows and emissive wall lighting.
+- **B1–B12 (Beta):** see `docs/beta-plan.md`. In short: D3D11 pinned on Windows, own binary FBX writer, NDI loaded
+  at runtime with discovery off, QtMultimedia for video/capture, own MVR with cgltf, Resolume preset round trip plus
+  REST client, FetchContent kept (re-opens D4), built-in `pixelStrip` object for LED strips.
+- **Schema 2:** `migrate()` in `core/model.cpp` upgrades schema 1 files on load (`composition.source` becomes
+  `{kind,...}`, top-level `layers` and `outputs`).
+
+## 9. Deferred (Release, do not build in Beta)
+- **Media:** Spout, Syphon and NDI *output* of the 3D view (optional milestone B8, only on request), MVR-xchange.
+- **Rendering:** shadows and emissive wall lighting, Bezier warp preview.
 - **Other:** the GDTF Share browser, DMX recorder, render export and headless render node.
 
 ## 10. Core API in brief (M1)

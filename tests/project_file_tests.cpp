@@ -105,3 +105,21 @@ TEST_CASE("AT-6 autosave is offered until the next real save") {
     sv::save_package(path, edited);
     CHECK_FALSE(sv::has_newer_autosave(path));
 }
+
+TEST_CASE("an alpha (schema 1) package migrates to schema 2") {
+    TempDir t;
+    sv::Package alpha = sample();
+    alpha.project["schemaVersion"] = 1;
+    alpha.project["composition"]["source"] = "testPattern";
+    alpha.project.erase("layers");
+    alpha.project.erase("outputs");
+    sv::save_package(t.dir / "alpha.svproj", alpha);
+
+    const json p = sv::load_package(t.dir / "alpha.svproj").project;
+    CHECK(p["schemaVersion"] == sv::schema_version);
+    CHECK(p["composition"]["source"] == json{{"kind", "testPattern"}});
+    CHECK(p["layers"].is_array());
+    CHECK(p["outputs"].is_array());
+    CHECK(p["futureTopLevel"] == 42);
+    CHECK(p["objects"] == alpha.project["objects"]);
+}

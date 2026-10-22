@@ -117,7 +117,8 @@ Package load_package(const fs::path &path) {
             error = "made by a newer version (schema " + std::to_string(v.get<int>()) + "), please update";
         else if (!pkg.project.contains("objects") || !pkg.project["objects"].is_array())
             error = "objects missing";
-        // Older schemas would be migrated here; schema 1 is the first.
+        else
+            migrate(pkg.project);
     }
     if (!error.empty())
         throw ProjectFileError(path.string() + ": " + error);

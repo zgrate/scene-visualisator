@@ -20,16 +20,32 @@ std::string new_uuid() {
 json new_project() {
     return {
         {"schemaVersion", schema_version},
-        {"app", {{"name", "Scene Visualiser"}, {"version", "0.1.0"}}},
+        {"app", {{"name", "Scene Visualiser"}, {"version", "0.2.0"}}},
         {"units", "m"}, // UI display unit; numbers in the file are always metres
         {"venue",
          {{"width", 20.0}, {"depth", 15.0}, {"height", 8.0}, {"decks", json::array()}, {"geometry", json::array()}}},
         {"objects", json::array()},
         {"patch", {{"universes", json::array()}}},
         {"composition",
-         {{"width", 1920}, {"height", 1080}, {"frameRate", 60}, {"source", "testPattern"}, {"layers", json::array()}}},
+         {{"width", 1920}, {"height", 1080}, {"frameRate", 60}, {"source", {{"kind", "testPattern"}}}, {"layers", json::array()}}},
+        {"layers", json::array()},  // MVR / drawing layers: {uuid, name, visible, locked}
+        {"outputs", json::array()}, // Resolume screens and Lumiverses: {uuid, name, kind, ...}
         {"layout", json::object()},
     };
+}
+
+void migrate(json &project) {
+    if (project.value("schemaVersion", 0) < 2) {
+        json &comp = project["composition"];
+        if (!comp.is_object())
+            comp = new_project()["composition"];
+        if (const json src = comp.value("source", json("testPattern")); src.is_string())
+            comp["source"] = {{"kind", src}};
+        for (const char *key : {"layers", "outputs"})
+            if (!project.contains(key))
+                project[key] = json::array();
+    }
+    project["schemaVersion"] = schema_version;
 }
 
 json new_deck(double width, double depth, double height) {

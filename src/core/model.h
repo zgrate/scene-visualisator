@@ -8,11 +8,13 @@ namespace sv {
 
 using json = nlohmann::json;
 
-inline constexpr int schema_version = 1;
+inline constexpr int schema_version = 2;
 
 std::string new_uuid(); // random v4, lowercase 8-4-4-4-12
 
 json new_project();
+// Upgrades an older project.json in place to schema_version (unknown keys stay). Schema 1 is the alpha.
+void migrate(json &project);
 json new_deck(double width, double depth, double height); // stage deck or riser, positioned by "position"
 
 // Scene objects. All share uuid, type, name, parent (uuid or null), position, rotation (deg), scale.
