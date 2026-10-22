@@ -7,6 +7,7 @@
 #include <QGuiApplication>
 #include <QMutex>
 #include <QQmlApplicationEngine>
+#include <QQuickImageProvider>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QStandardPaths>
@@ -18,6 +19,17 @@ namespace {
 QFile log_file;
 QMutex log_mutex;
 QtMessageHandler default_handler = nullptr;
+
+// image://composition/<anything> is the current composition for the Mapping screen; QML changes the id to reload.
+class CompositionProvider : public QQuickImageProvider {
+  public:
+    CompositionProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
+    QImage requestImage(const QString &, QSize *size, const QSize &) override {
+        const QImage img = Session::instance()->composition();
+        *size = img.size();
+        return img;
+    }
+};
 
 void log_message(QtMsgType type, const QMessageLogContext &context, const QString &message) {
     static const char *levels[] = {"debug", "warning", "critical", "fatal", "info"};
@@ -69,7 +81,7 @@ int main(int argc, char *argv[]) {
     QCommandLineOption generator("generator", "Run an internal test pattern: off, full, chase, rainbow, sweep.",
                                  "pattern", "off");
     args.addOption(generator);
-    QCommandLineOption screen("screen", "Start on a screen: design, patch, dmx, project.", "name", "design");
+    QCommandLineOption screen("screen", "Start on a screen: design, patch, dmx, mapping, project.", "name", "design");
     args.addOption(screen);
     args.addPositionalArgument("project", "A .svproj file to open; the demo rig when omitted.");
     args.process(app);
@@ -92,6 +104,7 @@ int main(int argc, char *argv[]) {
         session.set_generator(it->second);
 
     QQmlApplicationEngine engine;
+    engine.addImageProvider("composition", new CompositionProvider);
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
         Qt::QueuedConnection);

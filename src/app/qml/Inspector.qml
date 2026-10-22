@@ -17,6 +17,14 @@ Column {
         else Session.changed() // invalid input: re-read the stored value
     }
 
+    // Composition rect in pixels plus rotation (Arena InputRect).
+    component SliceField: Field {
+        label: qsTr("Slice")
+        readonly property var s: insp.o.slice || {}
+        values: [insp.fmt(s.x), insp.fmt(s.y), insp.fmt(s.w), insp.fmt(s.h), insp.fmt(s.angle || 0)]
+        onCommitted: (i, t) => insp.num("/slice/" + ["x", "y", "w", "h", "angle"][i], t)
+    }
+
     Label {
         visible: !insp.uuid
         text: qsTr("Nothing selected")
@@ -130,18 +138,79 @@ Column {
                 values: [insp.fmt(insp.o.nits), insp.fmt(insp.o.gamma)]
                 onCommitted: (i, t) => insp.num(i ? "/gamma" : "/nits", t)
             }
-            Field {
-                label: qsTr("Slice")
-                readonly property var s: insp.o.slice || {}
-                values: [insp.fmt(s.x), insp.fmt(s.y), insp.fmt(s.w), insp.fmt(s.h)]
-                onCommitted: (i, t) => insp.num("/slice/" + ["x", "y", "w", "h"][i], t)
-            }
+            SliceField {}
             Label {
                 x: 66
                 text: insp.o.resolution || ""
                 color: Theme.muted
                 font.pixelSize: Theme.small
             }
+        }
+
+        // Pixel strip (FR-16)
+        Column {
+            visible: insp.o.type === "pixelStrip"
+            width: parent.width
+            spacing: 4
+            Field {
+                label: qsTr("Pixels")
+                values: [insp.fmt(insp.o.pixels), insp.fmt(insp.o.rows)]
+                onCommitted: (i, t) => Number(t) >= 1 ? insp.num(i ? "/rows" : "/pixels", t) : Session.changed()
+            }
+            Field {
+                label: qsTr("Length m")
+                values: [insp.fmt(insp.o.length)]
+                onCommitted: (i, t) => insp.num("/length", t)
+            }
+            RowLayout {
+                width: parent.width
+                Label { text: qsTr("Colour"); color: Theme.muted; font.pixelSize: Theme.small + 1; Layout.preferredWidth: 62 }
+                ComboBox {
+                    readonly property var formats: ["rgb", "rbg", "grb", "gbr", "brg", "bgr", "rgbw", "grbw", "w"]
+                    Layout.fillWidth: true
+                    implicitHeight: 24
+                    font.pixelSize: Theme.small + 1
+                    model: formats.map(f => f.toUpperCase())
+                    currentIndex: formats.indexOf(insp.o.colorFormat || "rgb")
+                    onActivated: i => Session.edit(insp.uuid, "/colorFormat", formats[i])
+                }
+            }
+            Field {
+                label: qsTr("Dist · γ")
+                values: [insp.fmt(insp.o.distribution), insp.fmt(insp.o.gamma)]
+                // Distribution: pixels per universe, at most 512 / bytes per pixel (170 RGB, 128 RGBW).
+                onCommitted: (i, t) => {
+                    if (i === 1) return insp.num("/gamma", t)
+                    const max = Math.floor(512 / Math.max(1, (insp.o.colorFormat || "rgb").length))
+                    Number(t) >= 1 && Number(t) <= max ? insp.num("/distribution", t) : Session.changed()
+                }
+            }
+            Field {
+                label: qsTr("Patch")
+                values: [insp.o.patchText || ""]
+                onCommitted: (i, t) => { if (!Session.setPatch(insp.uuid, t)) Session.changed() }
+            }
+            Label {
+                x: 66
+                text: insp.o.lastText ? qsTr("%1 channels · to %2").arg(insp.o.footprint).arg(insp.o.lastText)
+                                      : qsTr("%1 channels").arg(insp.o.footprint || 0)
+                color: Theme.muted
+                font.pixelSize: Theme.small
+            }
+            RowLayout {
+                width: parent.width
+                Label { text: qsTr("Source"); color: Theme.muted; font.pixelSize: Theme.small + 1; Layout.preferredWidth: 62 }
+                ComboBox {
+                    readonly property var sources: ["dmx", "slice"]
+                    Layout.fillWidth: true
+                    implicitHeight: 24
+                    font.pixelSize: Theme.small + 1
+                    model: [qsTr("DMX (as WLED shows it)"), qsTr("Composition slice")]
+                    currentIndex: sources.indexOf(insp.o.pixelSource || "dmx")
+                    onActivated: i => Session.edit(insp.uuid, "/pixelSource", sources[i])
+                }
+            }
+            SliceField {}
         }
 
         // Truss
@@ -167,6 +236,11 @@ Column {
                 values: [insp.fmt(insp.o.length)]
                 onCommitted: (i, t) => insp.num("/length", t)
             }
+        }
+
+        ResolumeParams {
+            visible: insp.o.type === "ledWall" || insp.o.type === "pixelStrip"
+            uuid: insp.uuid
         }
 
         RowLayout {

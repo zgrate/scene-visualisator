@@ -25,7 +25,11 @@ QImage make_composition(const json &project) {
         if (o.value("type", std::string()) != "ledWall")
             continue;
         const json &s = o.value("slice", json::object());
-        const QRect r(s.value("x", 0), s.value("y", 0), s.value("w", w), s.value("h", h));
+        const double sw = s.value("w", double(w)), sh = s.value("h", double(h));
+        p.save();
+        p.translate(s.value("x", 0.0) + sw / 2, s.value("y", 0.0) + sh / 2);
+        p.rotate(s.value("angle", 0.0));
+        const QRect r = QRectF(-sw / 2, -sh / 2, sw, sh).toRect();
         p.setPen(QPen(Qt::white, std::max(2, h / 270)));
         p.setBrush(Qt::NoBrush);
         p.drawRect(r.adjusted(1, 1, -2, -2));
@@ -35,6 +39,7 @@ QImage make_composition(const json &project) {
         const QRect text = p.fontMetrics().boundingRect(r, Qt::AlignCenter, label).adjusted(-8, -4, 8, 4);
         p.fillRect(text, Qt::black);
         p.drawText(r, Qt::AlignCenter, label);
+        p.restore();
     }
     return img;
 }

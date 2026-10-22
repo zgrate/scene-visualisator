@@ -74,6 +74,7 @@ Column {
             }
             MenuItem { text: qsTr("LED wall"); onTriggered: Session.addWall() }
             MenuItem { text: qsTr("Truss"); onTriggered: Session.addTruss() }
+            MenuItem { text: qsTr("Pixel strip"); onTriggered: Session.addStrip() }
         }
     }
 }

@@ -49,12 +49,12 @@ ApplicationWindow {
     Shortcut { sequence: "Escape"; onActivated: Session.selectUuid("", false) }
     // Arrows nudge 0.25 m on the floor plane (Up = upstage, -Z); Page Up/Down raise and lower. Off while typing.
     readonly property bool typing: activeFocusItem instanceof TextInput
-    Shortcut { sequence: "Left"; enabled: !win.typing; onActivated: Session.nudgeSelection(-0.25, 0, 0) }
-    Shortcut { sequence: "Right"; enabled: !win.typing; onActivated: Session.nudgeSelection(0.25, 0, 0) }
-    Shortcut { sequence: "Up"; enabled: !win.typing; onActivated: Session.nudgeSelection(0, 0, -0.25) }
-    Shortcut { sequence: "Down"; enabled: !win.typing; onActivated: Session.nudgeSelection(0, 0, 0.25) }
-    Shortcut { sequence: "PgUp"; enabled: !win.typing; onActivated: Session.nudgeSelection(0, 0.25, 0) }
-    Shortcut { sequence: "PgDown"; enabled: !win.typing; onActivated: Session.nudgeSelection(0, -0.25, 0) }
+    Shortcut { sequence: "Left"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(-0.25, 0, 0) }
+    Shortcut { sequence: "Right"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0.25, 0, 0) }
+    Shortcut { sequence: "Up"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0, -0.25) }
+    Shortcut { sequence: "Down"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0, 0.25) }
+    Shortcut { sequence: "PgUp"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0.25, 0) }
+    Shortcut { sequence: "PgDown"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, -0.25, 0) }
     Shortcut { sequences: [StandardKey.Open]; onActivated: project.open() }
     Shortcut { sequences: [StandardKey.Save]; onActivated: project.save() }
 
@@ -72,7 +72,7 @@ ApplicationWindow {
                 font.pixelSize: Theme.fontSize
             }
             Repeater {
-                model: [["design", qsTr("Design")], ["patch", qsTr("Patch")], ["dmx", qsTr("DMX")]]
+                model: [["design", qsTr("Design")], ["patch", qsTr("Patch")], ["dmx", qsTr("DMX")], ["mapping", qsTr("Mapping")]]
                 Label {
                     required property var modelData
                     text: modelData[1]
@@ -151,7 +151,7 @@ ApplicationWindow {
             spacing: 6
             Repeater {
                 model: [["design", qsTr("Design")], ["patch", qsTr("Patch sheet")], ["dmx", qsTr("DMX monitor")],
-                        ["project", qsTr("Project")]]
+                        ["mapping", qsTr("Mapping")], ["project", qsTr("Project")]]
                 RailButton {
                     required property var modelData
                     text: modelData[1]
@@ -254,6 +254,11 @@ ApplicationWindow {
 
         DmxScreen {
             visible: win.screen === "dmx"
+            anchors.fill: parent
+        }
+
+        MappingScreen {
+            visible: win.screen === "mapping"
             anchors.fill: parent
         }
     }

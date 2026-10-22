@@ -249,7 +249,7 @@ void SceneRenderer::render(QRhiCommandBuffer *cb, QRhiRenderTarget *rt) {
             put(p, w.model);
             for (int i = 0; i < 4; ++i)
                 p[16 + i] = w.slice[i], p[20 + i] = w.grid[i];
-            p[24] = w.brightness, p[25] = w.selected ? 1.0f : 0.0f, p[26] = p[27] = 0;
+            p[24] = w.brightness, p[25] = w.selected ? 1.0f : 0.0f, p[26] = w.angle, p[27] = w.aspect;
         }
         for (const auto &b : scene.beams)
             beams.insert(beams.end(),

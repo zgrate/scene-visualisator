@@ -56,6 +56,8 @@ struct WallInstance {
     float brightness; // nits relative to 1500
     bool selected;
     int owner = -1;
+    float angle = 0;  // slice rotation about its centre, degrees, clockwise on screen (Arena InputRect)
+    float aspect = 1; // composition width / height, so the rotation keeps pixels square
 };
 struct FloorSpot {
     QVector2D centre;

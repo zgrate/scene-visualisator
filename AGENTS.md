@@ -84,17 +84,17 @@ Hard rules:
   keys are preserved.
 
 ## 6. Design rules (Studio, dark)
-- **Layout:** the 3D view is the page, with a 36 px icon rail on the left (Design, Patch, DMX monitor, Project).
+- **Layout:** the 3D view is the page, with a 36 px icon rail on the left (Design, Patch, DMX monitor, Mapping, Project).
   Floating cards sit on top: Objects at top-left, Inspector at top-right. They can be dragged and collapsed, and their
   positions persist in the project's `layout`.
 - **Dock:** a bottom dock holds the 512-bar universe meter. It is a C++ `QQuickItem` with one geometry node, never a
   Repeater. The patch sheet reuses it with `occupancy: true`.
-- **Screens:** Patch sheet (`PatchScreen.qml`), DMX monitor (`DmxScreen.qml`, grid is the C++ `ChannelGrid`) and Project
-  (`ProjectScreen.qml`) cover the viewport, which keeps running underneath. `--screen patch|dmx|project` starts on one,
+- **Screens:** Patch sheet (`PatchScreen.qml`), DMX monitor (`DmxScreen.qml`, grid is the C++ `ChannelGrid`) Mapping
+  (`MappingScreen.qml`) and Project (`ProjectScreen.qml`) cover the viewport, which keeps running underneath. `--screen patch|dmx|mapping|project` starts on one,
   which is how screenshots of them are taken.
 - **Controls:** use `Input` and `Check` (Studio-styled TextField and CheckBox) for free-standing fields; stock Fusion
   ones vanish on dark panels. Inspector rows use `Field`.
-- **Title bar:** the project name (• when unsaved), the tabs Design/Patch/DMX (Plan and Mapping are Beta), and the
+- **Title bar:** the project name (• when unsaved), the tabs Design/Patch/DMX/Mapping, and the
   Art-Net/sACN status.
 - **Colours:** use the `Theme` QML singleton only (`src/app/qml/Theme.qml`). Components contain no colour literals.
   Fusion style; its palette is set from Theme tokens in `Main.qml` (`QGuiApplication::setPalette` does not reach Quick
@@ -253,3 +253,18 @@ Hard rules:
   replaces the real file.
 - **Log:** every Qt message also goes to `AppDataLocation/logs/scene-visualiser.log`, rotated at launch (three kept).
 - **Release artefacts:** CI packs Windows (windeployqt, zip) and macOS (macdeployqt, dmg) builds, unsigned.
+
+## 16. Resolume and mapping (B3)
+- **`core/resolume.h`:** `resolume_import(xml, options)` reads an Arena Advanced Output preset into outputs, walls and
+  `pixelStrip`s plus warnings; `resolume_export(project)` writes it back. The source XML stays in
+  `project["resolumeSource"]` so untouched elements round-trip byte for byte (`tests/approved/arena-roundtrip.xml`).
+- **Params:** every Arena param lives in `obj.resolume.params` under its flat path key (`OutputDevice/.../TargetIP`),
+  never re-nested. `Session.resolumeParams(uuid)` lists them with type and range; `setResolumeParam(uuid, key, value)`
+  edits one (TargetIP is IPv4 or empty, which stores `TT_DISABLED`). `uuid` may be `"composition"`.
+- **Outputs:** `project.outputs` (`kind` is `lumiverse` or a device kind); objects point at one with `output` and map
+  through `slice {x, y, w, h, angle}` in composition pixels. `Session.edit` accepts output uuids and `"composition"`.
+- **Pixel strips:** `pixelStrip` has `pixels`, `rows`, `colorFormat`, `distribution`, `gamma`, `length`, `patch` and
+  `pixelSource` (`dmx` or `slice`). Use `sv::bytes_per_pixel` and `sv::strip_pixel_address`; a strip may span
+  universes, so walk channels with `for_each_channel` in `session.cpp`.
+- **Send to Resolume:** `resolumePreset()` names `Documents/Resolume Arena/Presets/Advanced Output/<project>.xml`.
+- **Mapping screen:** the composition comes from `image://composition/<n>`; slices drag in composition pixels.

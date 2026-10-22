@@ -2,7 +2,7 @@
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) flat in vec4 v_slice;
 layout(location = 2) flat in vec4 v_grid;
-layout(location = 3) flat in vec4 v_params; // brightness, selected
+layout(location = 3) flat in vec4 v_params; // brightness, selected, slice angle (degrees), composition aspect
 layout(location = 0) out vec4 frag;
 layout(std140, binding = 0) uniform Frame {
     mat4 view_proj;
@@ -20,7 +20,11 @@ void main() {
         return;
     }
     vec2 px = v_uv * v_grid.xy;
-    vec3 c = texture(composition, v_slice.xy + (floor(px) + 0.5) / v_grid.xy * v_slice.zw).rgb * v_params.x;
+    // Pixel centre relative to the slice centre, rotated by the slice angle in square-pixel units.
+    float a = radians(v_params.z), aspect = max(v_params.w, 1e-3);
+    vec2 l = ((floor(px) + 0.5) / v_grid.xy - 0.5) * v_slice.zw * vec2(aspect, 1.0);
+    l = vec2(l.x * cos(a) - l.y * sin(a), l.x * sin(a) + l.y * cos(a)) / vec2(aspect, 1.0);
+    vec3 c = texture(composition, v_slice.xy + 0.5 * v_slice.zw + l).rgb * v_params.x;
     // LED dot mask, faded out once a pixel is smaller than ~3 screen pixels.
     float cell = max(fwidth(px.x), fwidth(px.y));
     float dots = 1.0 - smoothstep(0.3, 0.62, length(fract(px) - 0.5));

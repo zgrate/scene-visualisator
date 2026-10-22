@@ -45,7 +45,12 @@ Rectangle {
     FileDialog {
         id: resolumeDialog
         nameFilters: [qsTr("Resolume Advanced Output (*.xml)")]
-        onAccepted: screen.report(Session.importResolume(selectedFile), qsTr("Screens imported"))
+        onAccepted: {
+            const error = Session.importResolume(selectedFile, Number(pitch.text) || 3.9, place.checked)
+            screen.report(error, Session.resolumeWarnings.length
+                          ? qsTr("Screens imported · %1 warnings, see Mapping").arg(Session.resolumeWarnings.length)
+                          : qsTr("Screens imported"))
+        }
     }
     // One save dialog for every export; kind picks the format, suffix and filter.
     FileDialog {
@@ -63,6 +68,16 @@ Rectangle {
         nameFilters: kind ? [formats[kind][1]] : []
         onAccepted: screen.report(Session.exportFile(kind, selectedFile), qsTr("Exported"))
     }
+    Dialog {
+        id: overwrite
+        property var preset: ({})
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Replace the Resolume preset?")
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        Label { text: overwrite.preset.path || ""; color: Theme.fg; font.family: Theme.mono; font.pixelSize: Theme.small + 1 }
+        onAccepted: screen.report(Session.exportFile("resolume", preset.url), qsTr("Preset written: %1").arg(preset.path))
+    }
     function exportAs(kind) { exportDialog.kind = kind; exportDialog.open() }
 
     component Section: Label {
@@ -74,7 +89,7 @@ Rectangle {
 
     Rectangle {
         anchors.centerIn: parent
-        width: 460
+        width: 540
         height: col.implicitHeight + 32
         color: Theme.panel
         border.color: Theme.line
@@ -110,6 +125,16 @@ Rectangle {
                 spacing: 6
                 Button { text: qsTr("GDTF…"); onClicked: gdtfDialog.open() }
                 Button { text: qsTr("Resolume screens…"); onClicked: resolumeDialog.open() }
+                Label { text: qsTr("pitch mm"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
+                Input {
+                    id: pitch
+                    implicitWidth: 48
+                    text: "3.9"
+                    font.family: Theme.mono
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Pixel pitch for new walls and strips; also scales their placement")
+                }
+                Check { id: place; text: qsTr("Place from composition"); checked: true }
             }
             RowLayout {
                 spacing: 6
@@ -131,6 +156,16 @@ Rectangle {
                 Button { text: qsTr("Patch CSV…"); onClicked: screen.exportAs("csv") }
                 Button { text: qsTr("grandMA3 patch…"); onClicked: screen.exportAs("ma3") }
                 Button { text: qsTr("Resolume output…"); onClicked: screen.exportAs("resolume") }
+                Button {
+                    text: qsTr("Send to Resolume")
+                    onClicked: {
+                        const p = Session.resolumePreset()
+                        if (p.exists) { overwrite.preset = p; overwrite.open() }
+                        else screen.report(Session.exportFile("resolume", p.url), qsTr("Preset written: %1").arg(p.path))
+                    }
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Writes an Advanced Output preset; pick it once in Arena's Advanced Output")
+                }
                 Button { text: qsTr("OBJ scene…"); onClicked: screen.exportAs("obj") }
                 Button {
                     text: qsTr("OBJ selection…")

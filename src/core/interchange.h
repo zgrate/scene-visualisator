@@ -16,10 +16,7 @@ struct InterchangeError : std::runtime_error {
 
 std::string patch_csv(const json &project);     // FR-8, FR-23
 std::string ma3_patch_xml(const json &project); // FR-23
-std::string resolume_xml(const json &project);  // FR-24
-// FR-24 import: walls matched by name get the slice and the size implied by the output rect; unknown screens become
-// new walls. Also sets the composition size. Throws InterchangeError.
-json resolume_import_patch(const json &project, std::string_view xml);
+// Resolume Advanced Output (FR-24) lives in core/resolume.h.
 
 // Triangle soup: x y z nx ny nz per vertex, three vertices per triangle, flat normals.
 struct ObjGroup {

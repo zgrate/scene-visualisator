@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <numbers>
 
@@ -162,9 +163,54 @@ struct Builder {
              {s.value("x", 0.0f) / cw, s.value("y", 0.0f) / ch, s.value("w", cw) / cw, s.value("h", ch) / ch},
              {float(derived.pixels_x), float(derived.pixels_y), float(derived.modules_x), float(derived.modules_y)},
              std::clamp(o.value("nits", 1500.0f) / 1500.0f, 0.1f, 4.0f),
-             sel});
+             sel,
+             -1,
+             s.value("angle", 0.0f),
+             cw / ch});
         scene.boxes.push_back({box(m, {0, h / 2, -0.05f}, {w, h, 0.09f}), tinted(wall_back, sel)});
         scene.pick.push_back({box(m, {0, h / 2, -0.04f}, {w, h, 0.1f}), uuid});
+    }
+
+    // A bar along local X centred on the origin, one emissive cell per pixel; a slice-fed strip samples the
+    // composition through the wall pass instead.
+    void strip(const json &o, const std::string &uuid, bool sel) {
+        const QMatrix4x4 m = world(o);
+        const int px = std::max(1, o.value("pixels", 1)), rows = std::max(1, o.value("rows", 1));
+        const float len = std::max(0.01f, o.value("length", 1.0f)), cell = len / float(px), depth = 0.03f;
+        const float h = cell * float(rows);
+        scene.boxes.push_back({box(m, {0, 0, -depth}, {len, h, depth}), tinted(wall_back, sel)});
+        scene.pick.push_back({box(m, {0, 0, -depth / 2}, {len, std::max(h, 0.05f), 2 * depth}), uuid});
+        if (o.value("pixelSource", std::string("dmx")) == "slice") {
+            const json &comp = project.value("composition", json::object());
+            const float cw = comp.value("width", 1920.0f), ch = comp.value("height", 1080.0f);
+            const json &s = o.value("slice", json::object());
+            QMatrix4x4 quad = m;
+            quad.translate(0, 0, 0.001f);
+            quad.scale(len, h, 1);
+            scene.walls.push_back(
+                {quad,
+                 {s.value("x", 0.0f) / cw, s.value("y", 0.0f) / ch, s.value("w", cw) / cw, s.value("h", ch) / ch},
+                 {float(px), float(rows), 1, 1},
+                 1,
+                 sel,
+                 -1,
+                 s.value("angle", 0.0f),
+                 cw / ch});
+            return;
+        }
+        const auto it = fixtures.find(uuid);
+        for (int r = 0; r < rows; ++r)
+            for (int i = 0; i < px; ++i) {
+                const std::size_t k = std::size_t(r * px + i);
+                QVector3D c;
+                if (it != fixtures.end() && k < it->second.attrs.cells.size())
+                    c = {it->second.attrs.cells[k][0], it->second.attrs.cells[k][1], it->second.attrs.cells[k][2]};
+                // alpha 2: emissive, the mesh shader skips lighting
+                scene.boxes.push_back(
+                    {box(m, {-len / 2 + (float(i) + 0.5f) * cell, h / 2 - (float(r) + 0.5f) * cell, 0},
+                         {cell * 0.8f, cell * 0.8f, depth}),
+                     {c.x(), c.y(), c.z(), 2}});
+            }
     }
 
     void set_piece(const json &o, const std::string &uuid, bool sel) {
@@ -211,6 +257,8 @@ struct Builder {
                 truss(o, uuid, sel);
             else if (type == "ledWall")
                 wall(o, uuid, sel);
+            else if (type == "pixelStrip")
+                strip(o, uuid, sel);
             else if (type == "setPiece")
                 set_piece(o, uuid, sel);
             // Cameras are not drawn.
@@ -250,6 +298,44 @@ bool hit_unit_box(const QMatrix4x4 &model, QVector3D origin, QVector3D dir, floa
     return true;
 }
 
+// Pixel colours of a DMX-driven strip, in Arena's colour order; W adds to all three.
+std::vector<gdtf::Rgb> strip_cells(const json &o, const FrameLookup &frame) {
+    const int n = std::max(0, o.value("pixels", 0)) * std::max(1, o.value("rows", 1));
+    std::vector<gdtf::Rgb> cells(std::size_t(n), gdtf::Rgb{});
+    if (!o.value("patch", json()).is_object() || o.value("pixelSource", std::string("dmx")) != "dmx")
+        return cells;
+    const std::string format = o.value("colorFormat", std::string("rgb"));
+    std::map<int, std::span<const std::uint8_t>> frames;
+    for (int i = 0; i < n; ++i) {
+        const DmxAddress at = strip_pixel_address(o, i);
+        auto it = frames.find(at.universe);
+        if (it == frames.end())
+            it = frames.emplace(at.universe, frame(std::uint16_t(at.universe))).first;
+        for (std::size_t k = 0; k < format.size(); ++k) {
+            const std::size_t slot = std::size_t(at.address - 1) + k;
+            if (slot >= it->second.size())
+                break;
+            const float v = it->second[slot] / 255.0f;
+            auto &c = cells[std::size_t(i)];
+            switch (std::tolower(format[k])) {
+            case 'r':
+                c[0] += v;
+                break;
+            case 'g':
+                c[1] += v;
+                break;
+            case 'b':
+                c[2] += v;
+                break;
+            case 'w':
+                c[0] += v, c[1] += v, c[2] += v;
+                break;
+            }
+        }
+    }
+    return cells;
+}
+
 } // namespace
 
 std::map<std::string, FixtureState> decode_fixtures(const json &project, const FixtureLibrary &library,
@@ -257,7 +343,12 @@ std::map<std::string, FixtureState> decode_fixtures(const json &project, const F
     std::map<std::string, FixtureState> out;
     static const std::array<std::uint8_t, 512> blackout{};
     for (const json &o : project.value("objects", json::array())) {
-        if (o.value("type", std::string()) != "fixture")
+        const std::string type = o.value("type", std::string());
+        if (type == "pixelStrip") {
+            out[o.value("uuid", std::string())].attrs.cells = strip_cells(o, frame);
+            continue;
+        }
+        if (type != "fixture")
             continue;
         FixtureState st;
         auto it = library.find(o.value("gdtf", std::string()));

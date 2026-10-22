@@ -22,11 +22,10 @@ void approve(const std::string &name, const std::string &actual) {
 
 } // namespace
 
-TEST_CASE("patch CSV, grandMA3 XML and Resolume XML match the approved files for the demo rig") {
+TEST_CASE("patch CSV and grandMA3 XML match the approved files for the demo rig") {
     const json project = demo_project();
     approve("demo_patch.csv", patch_csv(project));
     approve("demo_patch_ma3.xml", ma3_patch_xml(project));
-    approve("demo_advanced_output.xml", resolume_xml(project));
 }
 
 TEST_CASE("CSV quotes names and leaves unpatched fixtures blank") {
@@ -34,29 +33,6 @@ TEST_CASE("CSV quotes names and leaves unpatched fixtures blank") {
     json f = new_fixture("Spot, \"left\"", "Generic@Spot_7ch.gdtf", "Default");
     p["objects"].push_back(f);
     CHECK(patch_csv(p).ends_with("\n,\"Spot, \"\"left\"\"\",\"Generic@Spot_7ch\",\"Default\",,,,0,0,0,0,0,0\n"));
-}
-
-TEST_CASE("Resolume XML round trip restores walls matched by name") {
-    json project = demo_project();
-    const std::string xml = resolume_xml(project);
-    json changed = project;
-    for (json &o : changed["objects"])
-        if (o["type"] == "ledWall")
-            o["slice"] = {{"x", 0}, {"y", 0}, {"w", 1}, {"h", 1}};
-    changed["objects"].push_back(new_led_wall("Not in the file"));
-    const json patch = resolume_import_patch(changed, xml);
-    const json back = changed.patch(patch);
-    CHECK(back["objects"].size() == changed["objects"].size()); // all three matched, none added
-    for (std::size_t i = 0; i < project["objects"].size(); ++i)
-        CHECK(back["objects"][i] == project["objects"][i]);
-
-    const json fresh = new_project().patch(resolume_import_patch(new_project(), xml));
-    REQUIRE(fresh["objects"].size() == 3);
-    CHECK(fresh["objects"][0]["name"] == "Centre wall");
-    CHECK(fresh["objects"][0]["width"] == 6.0);
-    CHECK(fresh["objects"][0]["slice"]["w"] == 1280);
-    CHECK_THROWS_AS(resolume_import_patch(project, "<XmlState/>"), InterchangeError);
-    CHECK_THROWS_AS(resolume_import_patch(project, "<broken"), InterchangeError);
 }
 
 TEST_CASE("OBJ parser fans polygons, splits groups and resolves negative indices") {

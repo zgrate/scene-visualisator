@@ -1,6 +1,7 @@
 #include "session.h"
 
 #include "core/interchange.h"
+#include "core/resolume.h"
 #include "render/test_pattern.h"
 
 #include <QDir>
@@ -10,10 +11,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <algorithm>
 #include <climits>
+#include <ranges>
 
 Q_LOGGING_CATEGORY(lcSession, "sv.session")
 
@@ -30,9 +33,30 @@ json from_variant(const QVariant &v) {
 }
 
 int footprint(const sv::render::FixtureLibrary &lib, const json &o) {
+    if (o.value("type", std::string()) == "pixelStrip")
+        return std::max(0, o.value("pixels", 0)) * std::max(1, o.value("rows", 1)) * sv::bytes_per_pixel(o);
     const auto it = lib.find(o.value("gdtf", std::string()));
     const sv::gdtf::Mode *m = it == lib.end() ? nullptr : it->second.mode(o.value("mode", std::string()));
     return m ? m->footprint : 0;
+}
+
+// Calls fn(universe, channel) for every DMX channel a patched object uses: a fixture's footprint from its address
+// (cut at 512), a strip's pixels across the universes its Distribution rolls into.
+template <class F> void for_each_channel(const sv::render::FixtureLibrary &lib, const json &o, F fn) {
+    const json &p = o.value("patch", json());
+    if (!p.is_object())
+        return;
+    if (o.value("type", std::string()) == "pixelStrip") {
+        const int bpp = sv::bytes_per_pixel(o), n = footprint(lib, o) / bpp;
+        for (int i = 0; i < n; ++i)
+            for (const auto at = sv::strip_pixel_address(o, i); int c : std::views::iota(at.address, at.address + bpp))
+                if (c >= 1 && c <= 512)
+                    fn(at.universe, c);
+        return;
+    }
+    const int u = p.value("universe", 1), a = p.value("address", 1), fp = std::max(1, footprint(lib, o));
+    for (int c = std::max(a, 1); c < std::min(a + fp, 513); ++c)
+        fn(u, c);
 }
 
 QString patch_text(const json &patch) {
@@ -158,9 +182,8 @@ void Session::refresh() {
         library_snapshot_ = std::make_shared<const sv::render::FixtureLibrary>(library_), library_dirty_ = false;
     composition_ = sv::render::make_composition(document_.data());
     std::vector<std::uint16_t> universes;
-    for (const sv::json &o : document_.data().value("objects", sv::json::array()))
-        if (const sv::json &p = o.value("patch", sv::json()); p.is_object())
-            universes.push_back(p.value("universe", std::uint16_t(1)));
+    for (const QVariant &u : this->universes())
+        universes.push_back(std::uint16_t(u.toInt()));
     dmx_.subscribe(std::move(universes));
     if (pattern_ != sv::proto::Pattern::off)
         set_generator(pattern_);
@@ -217,6 +240,8 @@ QVariantList Session::objects() const {
         QString detail;
         if (type == "fixture")
             detail = patch_text(o.value("patch", json()));
+        else if (type == "pixelStrip")
+            detail = QStringLiteral("%1 px %2").arg(o.value("pixels", 0)).arg(patch_text(o.value("patch", json())));
         else if (type == "truss")
             detail = number(o.value("length", 0.0)) + " m";
         else if (type == "ledWall")
@@ -226,7 +251,9 @@ QVariantList Session::objects() const {
                                   {"name", QString::fromStdString(o.value("name", std::string()))},
                                   {"type", QString::fromStdString(type)},
                                   {"detail", detail},
-                                  {"selected", selection_.contains(uuid)}});
+                                  {"selected", selection_.contains(uuid)},
+                                  {"slice", to_variant(o.value("slice", json()))},
+                                  {"output", to_variant(o.value("output", json()))}});
     }
     return out;
 }
@@ -248,6 +275,14 @@ QVariantMap Session::current() const {
         m["overflow"] = p.is_object() && p.value("address", 1) + fp - 1 > 512;
         if (const auto it = library_.find(o.value("gdtf", std::string())); it != library_.end())
             m["typeName"] = QString::fromStdString(it->second.name);
+    } else if (type == "pixelStrip") {
+        const json &p = o.value("patch", json());
+        m["footprint"] = footprint(library_, o);
+        m["patchText"] = patch_text(p);
+        if (p.is_object() && o.value("pixels", 0) > 0) {
+            const auto last = sv::strip_pixel_address(o, footprint(library_, o) / sv::bytes_per_pixel(o) - 1);
+            m["lastText"] = patch_text({{"universe", last.universe}, {"address", last.address}});
+        }
     } else if (type == "ledWall") {
         const sv::WallDerived d = sv::wall_derived(o);
         m["resolution"] = QStringLiteral("%1 × %2 px · %3 × %4 modules")
@@ -279,8 +314,7 @@ QVariantMap Session::layout() const { return to_variant(document_.data().value("
 QVariantList Session::universes() const {
     std::set<int> u;
     for (const json &o : document_.data().at("objects"))
-        if (const json &p = o.value("patch", json()); p.is_object())
-            u.insert(p.value("universe", 1));
+        for_each_channel(library_, o, [&](int universe, int) { u.insert(universe); });
     return {u.begin(), u.end()};
 }
 
@@ -309,11 +343,25 @@ void Session::selectUuid(const QString &uuid, bool add) {
     select(uuid.isEmpty() ? std::nullopt : std::optional(uuid.toStdString()), add);
 }
 
+QVariantList Session::to_variant_list(const json &array) { return to_variant(array).toList(); }
+
+std::string Session::path_of(const std::string &uuid) const {
+    if (uuid == "composition")
+        return "/composition";
+    if (const int i = index_of(uuid); i >= 0)
+        return "/objects/" + std::to_string(i);
+    const json &outputs = document_.data().value("outputs", json::array());
+    for (std::size_t i = 0; i < outputs.size(); ++i)
+        if (outputs[i].value("uuid", std::string()) == uuid)
+            return "/outputs/" + std::to_string(i);
+    return {};
+}
+
 void Session::edit(const QString &uuid, const QString &pointer, const QVariant &value) {
-    const int i = index_of(uuid.toStdString());
-    if (i < 0)
+    const std::string base = path_of(uuid.toStdString());
+    if (base.empty())
         return;
-    const std::string path = "/objects/" + std::to_string(i) + pointer.toStdString();
+    const std::string path = base + pointer.toStdString();
     json v = from_variant(value);
     // QML numbers are doubles; keep integer fields (fixture ID, address, nits) integers in the file.
     const json::json_pointer ptr(path);
@@ -379,6 +427,13 @@ void Session::addWall() {
     add_object(std::move(w), "Add LED wall");
 }
 
+void Session::addStrip() {
+    json s = sv::new_pixel_strip("Pixel strip");
+    s["position"] = {0.0, 3.0, 0.0};
+    s["patch"] = next_patch(document_.data().at("objects"), library_, std::min(512, footprint(library_, s)));
+    add_object(std::move(s), "Add pixel strip");
+}
+
 void Session::addTruss() {
     json t = sv::new_truss("Truss", "straight", 6);
     t["position"] = {0.0, 6.0, 0.0};
@@ -396,11 +451,12 @@ void Session::duplicateSelection() {
         c["uuid"] = sv::new_uuid();
         c["name"] = o.value("name", std::string()) + " copy";
         c["position"][0] = c["position"][0].get<double>() + 0.5;
-        if (c.value("type", std::string()) == "fixture") {
+        if (c.contains("resolume") && c["resolume"].is_object())
+            c["resolume"].erase("uniqueId"); // the copy becomes its own Arena slice on export
+        if (c.value("type", std::string()) == "fixture")
             c["fixtureId"] = next_fixture_id(objects);
-            if (c["patch"].is_object())
-                c["patch"] = next_patch(objects, library_, footprint(library_, c));
-        }
+        if (c.value("patch", json()).is_object())
+            c["patch"] = next_patch(objects, library_, footprint(library_, c));
         copies.insert(c["uuid"].get<std::string>());
         objects.push_back(c);
         patch.push_back({{"op", "add"}, {"path", "/objects/-"}, {"value", c}});
@@ -539,15 +595,13 @@ QString Session::importGdtf(const QUrl &url) {
 std::array<std::uint8_t, 512> Session::occupancy(int universe) const {
     std::array<std::uint8_t, 512> out{};
     for (const json &o : document_.data().at("objects")) {
-        const json &p = o.value("patch", json());
-        if (!p.is_object() || p.value("universe", 1) != universe)
-            continue;
         const bool sel = selection_.contains(o.value("uuid", std::string()));
-        const int a = p.value("address", 1), fp = std::max(1, footprint(library_, o));
-        for (int c = std::max(a, 1); c < std::min(a + fp, 513); ++c) {
+        for_each_channel(library_, o, [&](int u, int c) {
+            if (u != universe)
+                return;
             std::uint8_t &slot = out[std::size_t(c - 1)];
             slot = sel ? 3 : slot ? 2 : 1;
-        }
+        });
     }
     return out;
 }
@@ -564,43 +618,37 @@ QVariantList Session::patch_rows() const {
     std::map<int, std::array<int, 512>> claims;
     const json &objects = document_.data().at("objects");
     for (const json &o : objects)
-        if (const json &p = o.value("patch", json()); p.is_object()) {
-            auto &c = claims.try_emplace(p.value("universe", 1), std::array<int, 512>{}).first->second;
-            const int a = p.value("address", 1), fp = std::max(1, footprint(library_, o));
-            for (int ch = std::max(a, 1); ch < std::min(a + fp, 513); ++ch)
-                ++c[std::size_t(ch - 1)];
-        }
+        for_each_channel(library_, o, [&](int u, int ch) { ++claims[u][std::size_t(ch - 1)]; });
     QVariantList out;
     for (const json &o : objects) {
-        if (o.value("type", std::string()) != "fixture")
+        const bool strip = o.value("type", std::string()) == "pixelStrip";
+        if (!strip && o.value("type", std::string()) != "fixture")
             continue;
         const json &p = o.value("patch", json());
         const int fp = footprint(library_, o);
         bool conflict = false;
-        if (p.is_object()) {
-            const auto &c = claims[p.value("universe", 1)];
-            const int a = p.value("address", 1);
-            for (int ch = std::max(a, 1); ch < std::min(a + std::max(fp, 1), 513); ++ch)
-                conflict |= c[std::size_t(ch - 1)] > 1;
-        }
+        for_each_channel(library_, o, [&](int u, int ch) { conflict |= claims[u][std::size_t(ch - 1)] > 1; });
         const auto type = library_.find(o.value("gdtf", std::string()));
         const json &id = o.value("fixtureId", json());
         const std::string uuid = o.value("uuid", std::string());
-        out.push_back(QVariantMap{
-            {"uuid", QString::fromStdString(uuid)},
-            {"fixtureId", id.is_number_integer() ? QVariant(id.get<int>()) : QVariant()},
-            {"name", QString::fromStdString(o.value("name", std::string()))},
-            {"type",
-             QString::fromStdString(type == library_.end() ? o.value("gdtf", std::string()) : type->second.name)},
-            {"mode", QString::fromStdString(o.value("mode", std::string()))},
-            {"universe", p.is_object() ? QVariant(p.value("universe", 1)) : QVariant()},
-            {"address", p.is_object() ? QVariant(p.value("address", 1)) : QVariant()},
-            {"patch", patch_text(p)},
-            {"footprint", fp},
-            {"position", to_variant(o.value("position", json::array()))},
-            {"conflict", conflict},
-            {"overflow", p.is_object() && p.value("address", 1) + fp - 1 > 512},
-            {"selected", selection_.contains(uuid)}});
+        out.push_back(
+            QVariantMap{{"uuid", QString::fromStdString(uuid)},
+                        {"fixtureId", id.is_number_integer() ? QVariant(id.get<int>()) : QVariant()},
+                        {"name", QString::fromStdString(o.value("name", std::string()))},
+                        {"type", strip                    ? tr("Pixel strip")
+                                 : type == library_.end() ? QString::fromStdString(o.value("gdtf", std::string()))
+                                                          : QString::fromStdString(type->second.name)},
+                        {"mode", QString::fromStdString(strip ? o.value("colorFormat", std::string("rgb")) + " · " +
+                                                                    std::to_string(o.value("pixels", 0)) + " px"
+                                                              : o.value("mode", std::string()))},
+                        {"universe", p.is_object() ? QVariant(p.value("universe", 1)) : QVariant()},
+                        {"address", p.is_object() ? QVariant(p.value("address", 1)) : QVariant()},
+                        {"patch", patch_text(p)},
+                        {"footprint", fp},
+                        {"position", to_variant(o.value("position", json::array()))},
+                        {"conflict", conflict},
+                        {"overflow", !strip && p.is_object() && p.value("address", 1) + fp - 1 > 512},
+                        {"selected", selection_.contains(uuid)}});
     }
     return out;
 }
@@ -651,7 +699,7 @@ QString Session::exportFile(const QString &kind, const QUrl &url) {
         else if (kind == "ma3")
             text = sv::ma3_patch_xml(document_.data());
         else if (kind == "resolume")
-            text = sv::resolume_xml(document_.data());
+            text = sv::resolume_export(document_.data());
         else if (kind == "obj" || kind == "objSelection") {
             if (kind == "objSelection" && selection_.empty())
                 return tr("Select objects first");
@@ -669,18 +717,86 @@ QString Session::exportFile(const QString &kind, const QUrl &url) {
     return {};
 }
 
-QString Session::importResolume(const QUrl &url) {
+QString Session::importResolume(const QUrl &url, double pitch, bool place) {
     QString error;
     const QByteArray xml = read_file(url, error);
     if (!error.isEmpty())
         return error;
     try {
-        apply(sv::resolume_import_patch(document_.data(), {xml.constData(), std::size_t(xml.size())}),
-              "Import Resolume");
+        sv::ResolumeImportOptions options;
+        options.pixel_pitch = pitch > 0 ? pitch : options.pixel_pitch;
+        options.place = place;
+        sv::ResolumeImport r =
+            sv::resolume_import(document_.data(), {xml.constData(), std::size_t(xml.size())}, options);
+        resolume_warnings_.clear();
+        for (const std::string &w : r.warnings) {
+            qCInfo(lcSession) << "Resolume import:" << w.c_str();
+            resolume_warnings_.push_back(QString::fromStdString(w));
+        }
+        if (!apply(r.patch, "Import Resolume"))
+            return tr("The Resolume file could not be applied, see the log");
     } catch (const std::exception &e) {
         return QString::fromUtf8(e.what());
     }
     return {};
+}
+
+QVariantList Session::resolumeParams(const QString &uuid) const {
+    const std::string path = path_of(uuid.toStdString());
+    if (path.empty())
+        return {};
+    QVariantList out;
+    try {
+        for (const sv::ResolumeParam &p :
+             sv::resolume_params(document_.data(), document_.data().at(json::json_pointer(path)))) {
+            QVariantMap m{{"key", QString::fromStdString(p.key)},
+                          {"label", QString::fromStdString(p.key).replace("~1", "/").replace("~0", "~")},
+                          {"element", QString::fromStdString(p.element)},
+                          {"type", QString::fromStdString(p.type)},
+                          {"value", QString::fromStdString(p.value)},
+                          {"def", QString::fromStdString(p.def)}};
+            if (p.min)
+                m["min"] = *p.min;
+            if (p.max)
+                m["max"] = *p.max;
+            out.push_back(m);
+        }
+    } catch (const std::exception &e) {
+        qCWarning(lcSession) << "Resolume params:" << e.what();
+    }
+    return out;
+}
+
+QString Session::setResolumeParam(const QString &uuid, const QString &key, const QVariant &value) {
+    const std::string path = path_of(uuid.toStdString());
+    if (path.empty())
+        return tr("Nothing to edit");
+    QVariant v = value;
+    if (key.endsWith("TargetIP")) {
+        const QString ip = value.toString().trimmed();
+        static const QRegularExpression ipv4(R"(^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$)");
+        if (!ip.isEmpty() && ip != "TT_DISABLED" && !ipv4.match(ip).hasMatch())
+            return tr("Target IP must be an IPv4 address, or empty for Arena's default output");
+        v = ip.isEmpty() ? QStringLiteral("TT_DISABLED") : ip;
+    }
+    const json &target = document_.data().at(json::json_pointer(path));
+    json r = target.contains("resolume") && target["resolume"].is_object() ? target["resolume"] : json::object();
+    const std::string text = sv::resolume_text(from_variant(v));
+    if (r.contains("params") && r["params"].contains(key.toStdString()) && r["params"][key.toStdString()] == text)
+        return {};
+    r["params"][key.toStdString()] = text;
+    apply(json::array(
+              {{{"op", target.contains("resolume") ? "replace" : "add"}, {"path", path + "/resolume"}, {"value", r}}}),
+          "Edit " + key.toStdString());
+    return {};
+}
+
+QVariantMap Session::resolumePreset() const {
+    const QDir dir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) +
+                   "/Resolume Arena/Presets/Advanced Output");
+    dir.mkpath(".");
+    const QString path = dir.filePath(name_ + ".xml");
+    return {{"path", path}, {"url", QUrl::fromLocalFile(path)}, {"exists", QFileInfo::exists(path)}};
 }
 
 QString Session::importObj(const QUrl &url, const QString &unit, bool zUp, bool split) {

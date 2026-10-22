@@ -1,5 +1,6 @@
 #include "core/model.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <map>
@@ -83,6 +84,36 @@ json new_led_wall(std::string name) {
     o["curvature"] = 0.0;                                       // degrees of arc across the width
     o["slice"] = {{"x", 0}, {"y", 0}, {"w", 1024}, {"h", 640}}; // input rect in composition pixels
     return o;
+}
+
+json new_pixel_strip(std::string name, int pixels) {
+    json o = new_object("pixelStrip", std::move(name));
+    o["pixels"] = pixels;
+    o["rows"] = 1;
+    o["colorFormat"] = "rgb";
+    o["gamma"] = 2.5;
+    o["distribution"] = 170;
+    o["length"] = pixels / 60.0; // metres, 60 LEDs per metre
+    o["patch"] = nullptr;
+    o["pixelSource"] = "dmx"; // dmx: decoded universes; slice: sampled from the composition along `slice`
+    o["slice"] = {{"x", 0}, {"y", 0}, {"w", pixels}, {"h", 4}, {"angle", 0}};
+    o["output"] = nullptr; // uuid of a lumiverse output
+    return o;
+}
+
+int bytes_per_pixel(const json &strip) {
+    return std::max<int>(1, int(strip.value("colorFormat", std::string("rgb")).size()));
+}
+
+DmxAddress strip_pixel_address(const json &strip, int pixel) {
+    const json &p = strip.at("patch");
+    const int bpp = bytes_per_pixel(strip), dist = std::max(1, strip.value("distribution", 170));
+    const int u = p.at("universe"), a = p.at("address");
+    const int room = std::max(0, (dist * bpp - (a - 1)) / bpp); // whole pixels left in the first universe
+    if (pixel < room)
+        return {u, a + pixel * bpp};
+    pixel -= room;
+    return {u + 1 + pixel / dist, 1 + pixel % dist * bpp};
 }
 
 json new_truss(std::string name, std::string truss_type, double length) {

@@ -43,6 +43,9 @@ class Session : public QObject {
     Q_PROPERTY(QVariantList patchRows READ patch_rows NOTIFY changed)  // one row per fixture for the patch sheet
     Q_PROPERTY(int conflictCount READ conflict_count NOTIFY changed)   // fixtures overlapping another
     Q_PROPERTY(QString recoveryFile READ recovery_file NOTIFY changed) // newer autosave to offer, or empty
+    Q_PROPERTY(QVariantList outputs READ outputs NOTIFY changed)       // Arena screens and Lumiverses (B3)
+    Q_PROPERTY(QVariantMap compositionInfo READ composition_info NOTIFY changed)   // project["composition"]
+    Q_PROPERTY(QStringList resolumeWarnings READ resolume_warnings NOTIFY changed) // from the last import
 
   public:
     explicit Session(QObject *parent); // no default: QML would construct its own instead of calling create()
@@ -91,16 +94,23 @@ class Session : public QObject {
     QVariantList patch_rows() const;
     int conflict_count() const;
     QString recovery_file() const { return recovery_; }
+    QVariantList outputs() const { return to_variant_list(document_.data().value("outputs", sv::json::array())); }
+    QStringList resolume_warnings() const { return resolume_warnings_; }
+    QVariantMap composition_info() const {
+        return to_variant_list(sv::json::array({document_.data().value("composition", sv::json::object())}))[0].toMap();
+    }
 
     Q_INVOKABLE QStringList modes(const QString &gdtf) const;
     Q_INVOKABLE void selectUuid(const QString &uuid, bool add); // empty uuid clears
-    // Sets a field of an object by JSON pointer relative to the object, e.g. "/position/1".
+    // Sets a field of an object or output by JSON pointer relative to it, e.g. "/position/1". The uuid
+    // "composition" edits the composition.
     Q_INVOKABLE void edit(const QString &uuid, const QString &pointer, const QVariant &value);
     Q_INVOKABLE void setFixtureType(const QString &uuid, const QString &gdtf); // resets the mode to the first
     Q_INVOKABLE bool setPatch(const QString &uuid, const QString &text);       // "universe.address", empty unpatches
     Q_INVOKABLE void addFixture(const QString &gdtf, const QString &mode);
     Q_INVOKABLE void addWall();
     Q_INVOKABLE void addTruss();
+    Q_INVOKABLE void addStrip();
     Q_INVOKABLE void duplicateSelection();
     Q_INVOKABLE void deleteSelection();
     Q_INVOKABLE void nudgeSelection(double dx, double dy, double dz); // metres, one undo step
@@ -117,7 +127,18 @@ class Session : public QObject {
     Q_INVOKABLE void selectUuids(const QStringList &uuids);
     // kind: csv, ma3, resolume, obj (whole scene) or objSelection.
     Q_INVOKABLE QString exportFile(const QString &kind, const QUrl &url);
-    Q_INVOKABLE QString importResolume(const QUrl &url);
+    // pitch: mm per composition pixel for new walls and strips; place: put new objects where the composition draws
+    // them.
+    Q_INVOKABLE QString importResolume(const QUrl &url, double pitch = 3.9, bool place = true);
+    // Every Arena param of an object, output or "composition": {key, label, element, type, value, def, min?, max?}.
+    Q_INVOKABLE QVariantList resolumeParams(const QString &uuid) const;
+    // Stores the value in Arena's text form under resolume.params; export writes it into the element.
+    // TargetIP must be IPv4; empty means TT_DISABLED (Arena's default output). Returns an error, empty on success.
+    Q_INVOKABLE QString setResolumeParam(const QString &uuid, const QString &key, const QVariant &value);
+    // "Send to Resolume": Documents/Resolume Arena/Presets/Advanced Output/<project>.xml (folder created) and whether
+    // it exists, so QML can confirm the overwrite before exportFile("resolume", path). Never the live
+    // AdvancedOutput.xml.
+    Q_INVOKABLE QVariantMap resolumePreset() const;
     // unit: m, cm, mm, in, ft. zUp rotates the file to Y-up. split: one set piece per OBJ group (FR-3).
     Q_INVOKABLE QString importObj(const QUrl &url, const QString &unit, bool zUp, bool split);
     Q_INVOKABLE QString recover();      // opens the autosave in place of the saved file, unsaved
@@ -131,6 +152,8 @@ class Session : public QObject {
     void refresh();
     bool apply(const sv::json &patch, const std::string &label); // logs and returns false if the patch fails
     int index_of(const std::string &uuid) const;
+    std::string path_of(const std::string &uuid) const; // "/objects/i", "/outputs/i", "/composition" or empty
+    static QVariantList to_variant_list(const sv::json &array);
     void add_object(sv::json object, const char *label);
     void add_gdtf(const std::string &name, std::vector<std::uint8_t> bytes); // throws on a bad file
     void rebuild_meshes();
@@ -150,6 +173,7 @@ class Session : public QObject {
     bool library_dirty_ = true;
     std::shared_ptr<const sv::render::MeshLibrary> meshes_ = std::make_shared<sv::render::MeshLibrary>();
     QString recovery_;
+    QStringList resolume_warnings_;
     QTimer autosave_timer_;
     sv::proto::DmxEngine dmx_;
     sv::proto::Pattern pattern_ = sv::proto::Pattern::off;

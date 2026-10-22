@@ -25,11 +25,8 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
             selection = s->selection();
             scene.set_composition(s->composition());
             buffers.clear();
-            for (const sv::json &o : project->value("objects", sv::json::array()))
-                if (const sv::json &p = o.value("patch", sv::json()); p.is_object()) {
-                    const auto u = p.value("universe", std::uint16_t(1));
-                    buffers.try_emplace(u, s->dmx().frames(u));
-                }
+            for (const QVariant &u : s->universes()) // every universe a fixture or strip reads
+                buffers.try_emplace(std::uint16_t(u.toInt()), s->dmx().frames(std::uint16_t(u.toInt())));
         }
         time = double(view->clock.elapsed()) / 1000;
     }

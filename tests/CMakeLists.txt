@@ -1,5 +1,5 @@
-add_executable(sv_tests core_tests.cpp document_tests.cpp project_file_tests.cpp interchange_tests.cpp gdtf_tests.cpp protocol_tests.cpp render_tests.cpp)
-target_link_libraries(sv_tests PRIVATE Catch2::Catch2WithMain sv_core sv_gdtf sv_proto sv_render asio)
+add_executable(sv_tests core_tests.cpp document_tests.cpp project_file_tests.cpp interchange_tests.cpp resolume_tests.cpp gdtf_tests.cpp protocol_tests.cpp render_tests.cpp)
+target_link_libraries(sv_tests PRIVATE Catch2::Catch2WithMain sv_core sv_gdtf sv_proto sv_render asio pugixml::pugixml)
 catch_discover_tests(sv_tests)
 target_compile_definitions(sv_tests PRIVATE SV_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
@@ -24,3 +24,4 @@ file(GLOB sv_test_gdtf CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/resources/gdtf/*.
 qt_add_resources(sv_session_tests "test_gdtf" PREFIX "/gdtf" BASE ${PROJECT_SOURCE_DIR}/resources/gdtf FILES ${sv_test_gdtf})
 target_link_libraries(sv_session_tests PRIVATE Catch2::Catch2 sv_render sv_proto Qt6::Qml)
 catch_discover_tests(sv_session_tests)
+target_compile_definitions(sv_session_tests PRIVATE SV_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

@@ -23,6 +23,17 @@ json new_led_wall(std::string name);
 json new_truss(std::string name, std::string truss_type = "straight", double length = 3.0);
 json new_set_piece(std::string name, std::string geometry_file);
 json new_camera(std::string name);
+// B12 LED pixel strip (WLED / Resolume Lumiverse). Cells run along local +X over `length` metres, centred.
+json new_pixel_strip(std::string name, int pixels = 60);
+
+// Channels per pixel of a strip: the length of its colorFormat ("rgb" 3, "rgbw" 4).
+int bytes_per_pixel(const json &strip);
+struct DmxAddress {
+    int universe, address;
+};
+// Arena's Distribution rule: `distribution` pixels fill a universe, a pixel never splits across two, and the next
+// universe starts at channel 1. Pixel 0 sits at the strip's patch.
+DmxAddress strip_pixel_address(const json &strip, int pixel);
 
 // The POC demo rig: a stage deck, 2 trusses, 19 fixtures of the bundled generic types on universe 1, 3 LED walls.
 json demo_project();

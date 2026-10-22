@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
 #include <fstream>
+#include <ranges>
 
 using sv::json;
 
@@ -172,6 +173,48 @@ TEST_CASE("Session imports an OBJ as set pieces, renders it and exports it again
     CHECK(groups[0].name == "Riser");
     CHECK(groups[0].vertices.size() == 2 * 3 * 6);
     CHECK(s.exportFile("nope", QUrl::fromLocalFile("/tmp/x")).size() > 0);
+}
+
+TEST_CASE("Session imports Arena outputs and strips, edits their params and exports them (FR-24)") {
+    const QString arena = QStringLiteral(SV_SOURCE_DIR "/tests/fixtures/resolume/arena-7.17-futro-ajki26.xml");
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    REQUIRE(s.importResolume(QUrl::fromLocalFile(arena)).isEmpty());
+    CHECK(s.outputs().size() == 10);
+    CHECK_FALSE(s.resolume_warnings().isEmpty());
+
+    // Every universe a strip rolls into is subscribed and occupied.
+    const json &objects = s.document().data()["objects"];
+    const auto strip = std::ranges::find(objects, json("pixelStrip"), [](const json &o) { return o["type"]; });
+    REQUIRE(strip != objects.end());
+    const auto last = sv::strip_pixel_address(*strip, (*strip)["pixels"].get<int>() - 1);
+    CHECK(s.universes().contains(last.universe));
+    CHECK(s.occupancy(last.universe)[std::size_t(last.address - 1)] != 0);
+    CHECK(s.patch_rows().size() == 41);
+
+    // A Lumiverse's Art-Net target is a param of the output.
+    QString lumiverse;
+    for (const QVariant &o : s.outputs())
+        if (o.toMap()["kind"] == "lumiverse")
+            lumiverse = o.toMap()["uuid"].toString();
+    REQUIRE_FALSE(lumiverse.isEmpty());
+    const QString key = "OutputDevice/OutputDeviceDmx/DmxOutputParams/TargetIP";
+    bool found = false;
+    for (const QVariant &p : s.resolumeParams(lumiverse))
+        found |= p.toMap()["key"] == key;
+    CHECK(found);
+    CHECK_FALSE(s.resolumeParams("composition").isEmpty());
+    s.setResolumeParam(lumiverse, key, "10.0.0.7");
+    s.edit(lumiverse, "/name", "Front LED");
+
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const auto out = dir / "arena.xml";
+    REQUIRE(s.exportFile("resolume", QUrl::fromLocalFile(QString::fromStdString(out.string()))).isEmpty());
+    std::ifstream in(out);
+    const std::string text((std::istreambuf_iterator<char>(in)), {});
+    CHECK(text.find("10.0.0.7") != std::string::npos);
+    CHECK(text.find("Front LED") != std::string::npos);
 }
 
 TEST_CASE("Session autosaves unsaved edits and offers them back after a crash (AT-6)") {
