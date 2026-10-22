@@ -31,8 +31,8 @@ tools/screenshot.sh /tmp/shot.png                    # real window on Xvfb + llv
 ## 3. Layout & boundaries
 | Target | Path | May use |
 |---|---|---|
-| `sv_core` | `src/core` | std, nlohmann_json, minizip-ng. **No Qt.** Model, `.svproj`, undo, exporters, OBJ |
-| `sv_gdtf` | `src/gdtf` | std, pugixml, minizip-ng. **No Qt.** GDTF reader, DMX→attribute decoder |
+| `sv_core` | `src/core` | std, nlohmann_json, miniz. **No Qt.** Model, `.svproj`, undo, exporters, OBJ |
+| `sv_gdtf` | `src/gdtf` | std, pugixml, miniz. **No Qt.** GDTF reader, DMX→attribute decoder |
 | `sv_proto` | `src/protocol` | std, Asio, ETCLabs sACN. **No Qt.** Art-Net/sACN receivers, merger, triple buffer |
 | `sv_render` | `src/render` | Qt Gui + QRhi only (no Quick/QML). Scene, beam and wall passes, shaders via `qt_add_shaders` |
 | `SceneVisualiser` | `src/app` | Qt Quick/QML. `ViewportItem` (QQuickRhiItem), models for QML, `qml/` |
@@ -118,7 +118,7 @@ Hard rules:
   libraries, never statically linked. Use only modules offered under LGPL; check `$QT_ROOT_DIR/sbom/*.spdx` before
   adding one. Build tools such as qsb and moc are GPL with Qt's exception, so their output carries no obligation.
 - **D4:** FetchContent for the alpha, not vcpkg. Switch to a vcpkg manifest in Beta (NDI, Spout, FBX).
-- **D5:** our own GDTF reader on pugixml and minizip-ng, not libMVRgdtf (licence and Boost/Xerces). No GDTF 3D models
+- **D5:** our own GDTF reader on pugixml and miniz, not libMVRgdtf (licence and Boost/Xerces). No GDTF 3D models
   in alpha.
 - **D6:** built-in meshes for fixtures, trusses and walls. OBJ import produces static set pieces.
 - **D7:** Qt Quick/QML, not Widgets.
@@ -129,3 +129,12 @@ Hard rules:
 - **Distribution:** signed installers and updaters.
 - **Rendering:** shadows and emissive wall lighting.
 - **Other:** the GDTF Share browser, DMX recorder, render export and headless render node.
+
+## 10. Core API in brief (M1)
+- **`core/model.h`:** the document is a `nlohmann::json` tree in project.json form. Factories `new_project()`,
+  `new_fixture()`, `new_led_wall()`, `new_truss()`, `new_set_piece()`, `new_camera()` and `new_deck()` define defaults.
+  `wall_derived()` gives native resolution and module count (FR-7).
+- **`core/document.h`:** `Document::apply(patch, label)` is the only way to edit. Undo, redo, history and dirty
+  tracking come with it.
+- **`core/project_file.h`:** `load_package` and `save_package` handle `.svproj` with atomic writes and three backups.
+  `write_autosave` and `has_newer_autosave` support recovery on launch (AT-6).
