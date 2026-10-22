@@ -1,6 +1,6 @@
 # Third-party code via FetchContent, pinned by tag (decision D4: no vcpkg in alpha).
-# shortcut: only deps the current milestone uses are declared, add pugixml/asio/spdlog/tinyobjloader/
-# ETCLabs sACN here in the milestone that first includes them (M2-M6).
+# shortcut: only deps the current milestone uses are declared, add pugixml/spdlog/tinyobjloader here in the
+# milestone that first includes them (M3-M6).
 include(FetchContent)
 
 FetchContent_Declare(nlohmann_json
@@ -16,6 +16,22 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5) # miniz 3.0.2 asks for CMake < 3.5, which CMake 4 rejects
 FetchContent_MakeAvailable(nlohmann_json miniz)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
+
+# Standalone Asio (header-only) for the network thread. sACN uses our own E1.31 receiver on it, not the ETCLabs
+# library (the spec's named fallback): one socket model, no EtcPal threads.
+FetchContent_Declare(asio
+    URL https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-2.tar.gz
+    URL_HASH SHA256=755bd7f85a4b269c67ae0ea254907c078d408cce8e1a352ad2ed664d233780e8)
+FetchContent_MakeAvailable(asio)
+find_package(Threads REQUIRED)
+add_library(asio INTERFACE)
+target_include_directories(asio SYSTEM INTERFACE ${asio_SOURCE_DIR}/asio/include)
+target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+target_link_libraries(asio INTERFACE Threads::Threads)
+if(WIN32)
+    target_compile_definitions(asio INTERFACE _WIN32_WINNT=0x0A00)
+    target_link_libraries(asio INTERFACE ws2_32 mswsock)
+endif()
 
 if(BUILD_TESTING)
     FetchContent_Declare(Catch2

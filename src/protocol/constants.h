@@ -6,10 +6,19 @@
 
 namespace sv::proto {
 
+using Slots = std::array<std::uint8_t, 512>;
+
 inline constexpr std::uint16_t artnet_port = 6454;
 inline constexpr std::uint16_t sacn_port = 5568;
 inline constexpr auto artnet_timeout = std::chrono::milliseconds(3000);
 inline constexpr auto sacn_timeout = std::chrono::milliseconds(2500);
+inline constexpr auto artsync_timeout = std::chrono::milliseconds(4000); // Art-Net 4: sync mode ends after 4 s
+inline constexpr std::size_t max_universes = 64;                         // subscribed per project
+
+// Project universes are 1-based and equal the sACN universe; Art-Net Port-Address = universe - 1
+// (the console convention: universe 1 is Art-Net 0:0:0).
+constexpr std::uint16_t universe_from_port_address(std::uint16_t pa) { return std::uint16_t(pa + 1); }
+constexpr std::uint16_t port_address_from_universe(std::uint16_t u) { return std::uint16_t(u - 1); }
 
 // Art-Net 4 15-bit Port-Address: Net (7 bits) : Sub-Net (4 bits) : Universe (4 bits).
 constexpr std::uint16_t port_address(unsigned net, unsigned subnet, unsigned universe) {

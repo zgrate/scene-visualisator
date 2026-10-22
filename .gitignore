@@ -8,3 +8,4 @@ CMakeUserPresets.json
 /.artifacts/
 /.playwright-mcp/
 aqtinstall.log
+__pycache__/

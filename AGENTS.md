@@ -18,6 +18,7 @@ export QT_ROOT_DIR=$HOME/Qt/6.12.0/gcc_64            # same variable install-qt-
 export SV_EXTRA_PREFIX=$HOME/.local/gldev/root/usr   # GL + xkbcommon dev headers unpacked without sudo
 cmake --preset linux-debug && cmake --build --preset linux-debug && ctest --preset linux-debug
 tools/screenshot.sh /tmp/shot.png                    # real window on Xvfb + llvmpipe, saved by the app itself
+python3 tools/dmx_send.py --proto sacn --universes 1-4 --pattern chase   # test DMX source (stdlib only)
 ```
 - **Claude Code:** `.claude/settings.local.json` sets both environment variables, which are machine-specific and gitignored.
 - **Outputs:** binaries land in `build/<preset>/bin/`.
@@ -33,7 +34,7 @@ tools/screenshot.sh /tmp/shot.png                    # real window on Xvfb + llv
 |---|---|---|
 | `sv_core` | `src/core` | std, nlohmann_json, miniz. **No Qt.** Model, `.svproj`, undo, exporters, OBJ |
 | `sv_gdtf` | `src/gdtf` | std, pugixml, miniz. **No Qt.** GDTF reader, DMX→attribute decoder |
-| `sv_proto` | `src/protocol` | std, Asio, ETCLabs sACN. **No Qt.** Art-Net/sACN receivers, merger, triple buffer |
+| `sv_proto` | `src/protocol` | std, Asio (private). **No Qt.** Art-Net/sACN receivers, merger, triple buffer, generators |
 | `sv_render` | `src/render` | Qt Gui + QRhi only (no Quick/QML). Scene, beam and wall passes, shaders via `qt_add_shaders` |
 | `SceneVisualiser` | `src/app` | Qt Quick/QML. `ViewportItem` (QQuickRhiItem), models for QML, `qml/` |
 
@@ -66,7 +67,10 @@ Hard rules:
   ArtPollReply, ArtDmx and ArtSync. Out-of-order sequence numbers are dropped. The timeout is 3 s.
 - **sACN E1.31:** UDP 5568, multicast `239.255.U_hi.U_lo`. It covers priority 0–200, per-address priority (start code
   0xDD), sync, and a 2.5 s timeout.
-- **Merge:** each universe merges by HTP, LTP or priority. Internal generators are just another source.
+- **Universe numbering:** project universe U is 1-based and equals sACN universe U. Art-Net Port-Address is U−1, so
+  universe 1 is Art-Net 0:0:0. Convert only with `universe_from_port_address` and `port_address_from_universe`.
+- **Merge:** each universe merges by HTP, LTP or priority (default). Under priority, the highest priority wins; on a tie,
+  intensity slots merge HTP and the rest LTP. Internal generators and pasted frames are just more sources.
 - **`.svproj`:** a zip of `project.json` (with `schemaVersion`) plus `gdtf/`, `geometry/`, `media/` and `exports/`.
   Writes are atomic (temp file then rename), with 3 backups and a 2-minute autosave. Every object has a UUID. Unknown
   keys are preserved.
@@ -138,3 +142,16 @@ Hard rules:
   tracking come with it.
 - **`core/project_file.h`:** `load_package` and `save_package` handle `.svproj` with atomic writes and three backups.
   `write_autosave` and `has_newer_autosave` support recovery on launch (AT-6).
+
+## 11. DMX API in brief (M2)
+- **`protocol/dmx_engine.h`:** `DmxEngine` owns the network thread. It handles Art-Net (ArtDmx, ArtSync hold, ArtPoll
+  reply) and sACN (own E1.31 receiver: priority, 0xDD, sync, termination). Call `subscribe()` with at most 64 universes.
+  The render thread reads `frames(u)`, a `TripleBuffer<UniverseFrame>` with one consumer per universe. The UI polls
+  `status()` for data, rate, loss and sources.
+- **Internal sources:** `set_internal_frame()` handles paste-a-frame and the fader page. `set_generator()` runs at 44 Hz.
+  Generator targets map GDTF attribute names (`Dimmer`, `Pan`, `Tilt`, `ColorAdd_R/G/B/W`, `Color1`) to footprint
+  offsets.
+- **Packets and merge:** `protocol/packets.h` builds and parses packets, also for tests. `protocol/merger.h` holds the
+  merge rule.
+- **We wrote our own sACN receiver, not the ETCLabs library.** This is the spec's named fallback: one socket model and
+  no EtcPal.
