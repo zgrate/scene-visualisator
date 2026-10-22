@@ -273,13 +273,13 @@ Hard rules:
 
 ## 17. Composition sources (B1)
 - **`composition.source.kind`:** `testPattern`, `grid` (mapping grid with coordinates), `still`, `video`, `screen` or
-  `window`. `make_composition(project, still)` in `render/test_pattern.h` draws patterns, or places `still` by
+  `window`, `ndi`, `spout` or `syphon` (section 21). `make_composition(project, still)` in `render/test_pattern.h` draws patterns, or places `still` by
   `source.fit` (fit, fill, stretch); walls get outlines on top.
 - **`MediaSource`** (`media/media_source.h`) lives on the UI thread. Frames land in a mutex-guarded latest-wins slot;
   the render thread polls `latest(serial)`, which returns a null image when nothing is new. The player and the capture
   session each need their own `QVideoSink`: one sink on both delivers nothing.
 - **Session:** `setMediaFile(kind, url)` copies files up to 200 MB into `media/` in the package and links larger ones
-  by absolute path. `mediaSources(kind)` lists screens or windows. `mediaStatus` is `{kind, width, height, fps, signal,
+  by absolute path. `mediaSources(kind)` lists screens, windows or senders. `mediaStatus` is `{kind, width, height, fps, signal, latency,
   live, error}`, refreshed with `dmxChanged()`. The dock's MEDIA button opens `MediaCard.qml`.
 - **Screenshots:** `--screenshot` waits up to 5 s for a live source's first frame.
 
@@ -329,3 +329,21 @@ Hard rules:
   Drawings are paper white with fixed ink colours on purpose; the Theme rule covers the app chrome, not the sheet.
 - **Goldens:** `tests/golden/plan.png` and `front.png` are rendered without lettering (`sheet.text = false`) by
   `sv_session_tests`; regenerate with `SV_UPDATE_GOLDEN=1`.
+
+## 21. NDI, Spout and Syphon (B2)
+- **Kinds:** `MediaSource::open` takes `ndi`, `spout` or `syphon` with a sender name. Every receiver runs on its own
+  thread and hands BGRA `QImage`s to the same latest-wins slot as video and capture.
+- **NDI (`media/ndi.h`):** `third_party/ndi/` holds the MIT SDK headers only. `ndi_api()` loads the runtime at run time
+  from `$NDI_RUNTIME_DIR_V6`, then the system path; it is never linked or shipped. `ndi_sources()` blocks for about a
+  second, so it never sits in a QML binding (NFR-9). `NdiReceiver` asks for the highest bandwidth and BGRX/BGRA, drops
+  audio, and leaves reconnect-by-name to the runtime. The `[ndi]` session test is a loopback sender, skipped without a
+  runtime. NDI compresses even on loopback, so pixel checks need a tolerance.
+- **Spout (`spout_receiver.cpp`, Windows only):** this is our own reader, not the Spout SDK. It reads the
+  `SpoutSenderNames` and per-sender `SharedTextureInfo` shared memory, opens the legacy D3D11 shared handle under
+  `<name>_SpoutAccessMutex`, and copies the texture through a staging texture. It is compile-checked with MinGW only.
+- **Syphon (`syphon_receiver.mm`, macOS, `SV_WITH_SYPHON`):** it builds the client-side sources of Syphon-Framework at
+  a pinned commit and subclasses `SyphonClientBase`, then locks and copies the IOSurface. It has never been compiled
+  here.
+- **NativeReceiver:** one file per platform defines `create` and `senders`; `native_receiver_none.cpp` covers Linux.
+- **Latency (NFR-3):** `MediaStatus::latency_ms` is the smoothed time from a frame's arrival to the render thread
+  taking it. The Media card shows it next to the frame rate.

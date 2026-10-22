@@ -2,12 +2,16 @@
 
 #include "core/interchange.h"
 #include "core/project_file.h"
+#include "media/media_source.h"
+#include "media/ndi.h"
 
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QGuiApplication>
 #include <QPainter>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QThread>
 #include <QTimer>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
@@ -495,4 +499,74 @@ TEST_CASE("Session exports drawings to a one-page A3 landscape PDF and to SVG (F
     CHECK(xml.contains("<svg"));
     CHECK(xml.contains("viewBox=\"0 0 420 297\""));
     CHECK(s.exportDrawing("plan", QUrl::fromLocalFile("/nonexistent/dir/x.pdf")).size() > 0);
+}
+
+TEST_CASE("NDI loopback: a local sender is found, received as BGRA and followed through a size change (FR-13)",
+          "[ndi]") {
+    const NDIlib_v6 *ndi = sv::media::ndi_api();
+    if (!ndi)
+        SKIP("NDI runtime not found; set NDI_RUNTIME_DIR_V6");
+    NDIlib_send_create_t settings;
+    settings.p_ndi_name = "sv-loopback";
+    settings.clock_video = false;
+    NDIlib_send_instance_t sender = ndi->send_create(&settings);
+    REQUIRE(sender);
+    const auto send = [&](int w, int h, quint32 bgra) {
+        std::vector<quint32> pixels(size_t(w) * size_t(h), bgra);
+        NDIlib_video_frame_v2_t frame;
+        frame.xres = w;
+        frame.yres = h;
+        frame.FourCC = NDIlib_FourCC_video_type_BGRA;
+        frame.frame_format_type = NDIlib_frame_format_type_progressive;
+        frame.p_data = reinterpret_cast<uint8_t *>(pixels.data());
+        frame.line_stride_in_bytes = w * 4;
+        ndi->send_send_video_v2(sender, &frame);
+    };
+    // Waits up to `ms`, sending frames meanwhile, until `done` holds; pumps events like the app's UI thread.
+    const auto spin = [&](int ms, int w, int h, quint32 bgra, auto done) {
+        QElapsedTimer timer;
+        timer.start();
+        for (; timer.elapsed() < ms; QThread::msleep(20)) {
+            send(w, h, bgra);
+            QCoreApplication::processEvents();
+            if (done())
+                return true;
+        }
+        return false;
+    };
+
+    QString name;
+    for (int tries = 0; tries < 10 && name.isEmpty(); ++tries)
+        for (const QString &source : sv::media::ndi_sources(500))
+            if (source.endsWith("(sv-loopback)"))
+                name = source;
+    REQUIRE_FALSE(name.isEmpty());
+    CHECK(sv::media::MediaSource::available("ndi").contains(name));
+
+    sv::media::MediaSource media;
+    media.open("ndi", name);
+    REQUIRE(media.active());
+    quint64 serial = 0;
+    QImage got;
+    const auto frame_of = [&](QSize size) {
+        return [&, size] {
+            if (QImage image = media.latest(serial); !image.isNull())
+                got = image;
+            return got.size() == size;
+        };
+    };
+    REQUIRE(spin(5000, 320, 180, 0xff2040c0u, frame_of({320, 180})));
+    // BGRA in memory is ARGB32's 0xAARRGGBB; NDI compresses even on loopback, so channels come back near, not equal.
+    const QColor c = got.pixelColor(10, 10);
+    CHECK(std::abs(c.red() - 0x20) < 12);
+    CHECK(std::abs(c.green() - 0x40) < 12);
+    CHECK(std::abs(c.blue() - 0xc0) < 12);
+    REQUIRE(spin(5000, 640, 360, 0xff00ff00u, frame_of({640, 360})));
+    const sv::media::MediaStatus status = media.status();
+    CHECK(status.signal);
+    CHECK(status.fps > 0);
+    CHECK(status.latency_ms >= 0);
+
+    media.open({}, {}); // joins the receiver thread before the sender goes away
+    ndi->send_destroy(sender);
 }

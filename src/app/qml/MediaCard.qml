@@ -4,7 +4,8 @@ import QtQuick.Dialogs
 import QtQuick.Layouts
 
 // FR-13/14 composition source, opened from the dock: test pattern, mapping grid, still image, video file, screen or
-// window capture. Status reads "1920×1080 · 59.9 fps" or "No signal" in the warn colour.
+// window capture, NDI, Spout (Windows) or Syphon (macOS). Status reads "1920×1080 · 59.9 fps · 18 ms" (NFR-3:
+// arrival to render) or "No signal" in the warn colour.
 Popup {
     id: card
     width: 300
@@ -12,7 +13,15 @@ Popup {
     readonly property var source: (Session.compositionInfo.source || { kind: "testPattern" })
     readonly property var kinds: [["testPattern", qsTr("Test pattern")], ["grid", qsTr("Mapping grid")],
                                   ["still", qsTr("Still image")], ["video", qsTr("Video file")],
-                                  ["screen", qsTr("Screen capture")], ["window", qsTr("Window capture")]]
+                                  ["screen", qsTr("Screen capture")], ["window", qsTr("Window capture")],
+                                  ["ndi", qsTr("NDI")]].concat(
+                                  Qt.platform.os === "windows" ? [["spout", qsTr("Spout")]]
+                                  : Qt.platform.os === "osx" ? [["syphon", qsTr("Syphon")]] : [])
+    readonly property bool named: ["screen", "window", "ndi", "spout", "syphon"].includes(card.source.kind)
+    // NDI discovery blocks for a second and runs only on request (NFR-9), so it is never part of a binding.
+    function listed(kind) {
+        return kind === "ndi" ? (card.source.name ? [card.source.name] : []) : Session.mediaSources(kind)
+    }
     property string error
 
     function setSource(value) { card.error = ""; Session.edit("composition", "/source", value) }
@@ -43,19 +52,19 @@ Popup {
             onActivated: i => {
                 const kind = card.kinds[i][0]
                 if (kind === "still" || kind === "video") { fileDialog.kind = kind; fileDialog.open() }
-                else if (kind === "screen" || kind === "window")
+                else if (["screen", "window", "ndi", "spout", "syphon"].includes(kind))
                     card.setSource({ kind: kind, name: Session.mediaSources(kind)[0] || "" })
                 else card.setSource({ kind: kind })
             }
         }
-        // Capture target
+        // Capture target or sender
         ComboBox {
             id: target
-            visible: card.source.kind === "screen" || card.source.kind === "window"
+            visible: card.named
             Layout.fillWidth: true
-            model: visible ? Session.mediaSources(card.source.kind) : []
+            model: visible ? card.listed(card.source.kind) : []
             currentIndex: model.indexOf(card.source.name)
-            displayText: currentIndex < 0 ? (card.source.name || qsTr("Nothing to capture")) : currentText
+            displayText: currentIndex < 0 ? (card.source.name || qsTr("Nothing found")) : currentText
             onActivated: i => card.setSource({ kind: card.source.kind, name: model[i] })
             onPressedChanged: if (pressed) model = Session.mediaSources(card.source.kind) // re-list on open
         }
@@ -114,7 +123,8 @@ Popup {
             wrapMode: Text.Wrap
             visible: st.live || st.error !== ""
             text: st.error !== "" ? st.error
-                  : st.signal ? qsTr("%1×%2 · %3 fps").arg(st.width).arg(st.height).arg(st.fps.toFixed(1))
+                  : st.signal ? qsTr("%1×%2 · %3 fps · %4 ms").arg(st.width).arg(st.height).arg(st.fps.toFixed(1))
+                                                                .arg(st.latency.toFixed(0))
                   : qsTr("No signal")
             color: st.error !== "" ? Theme.err : st.signal ? Theme.ok : Theme.warn
             font.family: Theme.mono

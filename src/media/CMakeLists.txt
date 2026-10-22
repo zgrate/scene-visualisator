@@ -1,5 +1,17 @@
 # Live composition sources (FR-13, FR-14). Qt Gui + Multimedia, never Quick/QML.
-add_library(sv_media STATIC media_source.cpp media_source.h)
+add_library(sv_media STATIC media_source.cpp media_source.h ndi.cpp ndi.h native_receiver.h)
 target_include_directories(sv_media PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+# NDI headers only (MIT); the runtime is loaded at run time, never linked.
+target_include_directories(sv_media SYSTEM PUBLIC ${PROJECT_SOURCE_DIR}/third_party/ndi)
 target_link_libraries(sv_media PUBLIC Qt6::Gui Qt6::Multimedia)
+if(WIN32)
+    target_sources(sv_media PRIVATE spout_receiver.cpp)
+    target_link_libraries(sv_media PRIVATE d3d11)
+elseif(APPLE AND SV_WITH_SYPHON)
+    target_sources(sv_media PRIVATE syphon_receiver.mm)
+    set_source_files_properties(syphon_receiver.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_link_libraries(sv_media PRIVATE syphon)
+else()
+    target_sources(sv_media PRIVATE native_receiver_none.cpp)
+endif()
 set_target_properties(sv_media PROPERTIES AUTOMOC ON)

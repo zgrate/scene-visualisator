@@ -841,7 +841,8 @@ void Session::update_media() {
     const json opened = {{"kind", kind}, {"file", file}, {"name", src.is_object() ? src.value("name", "") : ""}};
     if (opened != media_opened_) {
         media_opened_ = opened;
-        const bool live = kind == "video" || kind == "screen" || kind == "window";
+        const bool live = kind == "video" || kind == "screen" || kind == "window" || kind == "ndi" || kind == "spout" ||
+                          kind == "syphon";
         media_.open(live ? QString::fromStdString(kind) : QString(),
                     kind == "video" ? path_of_file() : QString::fromStdString(opened["name"].get<std::string>()));
     }
@@ -858,6 +859,7 @@ QVariantMap Session::media_status() const {
             {"height", st.size.height()},
             {"fps", st.fps},
             {"signal", st.signal},
+            {"latency", st.latency_ms},
             {"live", media_.active()},
             {"error", st.error}};
 }

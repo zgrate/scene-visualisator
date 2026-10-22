@@ -60,6 +60,26 @@ if(WIN32)
     target_link_libraries(asio INTERFACE ws2_32 mswsock)
 endif()
 
+# Syphon client (macOS, BSD-2). Only the client-side sources are built: no GL or Metal parts. Pinned to a main-branch
+# commit because the last tag ("5", 2020) predates SyphonClientBase.
+option(SV_WITH_SYPHON "Build the Syphon input (macOS)" ON)
+if(APPLE AND SV_WITH_SYPHON)
+    FetchContent_Declare(syphon
+        GIT_REPOSITORY https://github.com/Syphon/Syphon-Framework.git
+        GIT_TAG f4761677a45b8034a3c2069ec0f3d2553da81fba
+        SYSTEM)
+    FetchContent_MakeAvailable(syphon) # no CMakeLists.txt upstream, so this only downloads
+    set(_syphon_sources SyphonClientBase.m SyphonServerDirectory.m SyphonClientConnectionManager.m SyphonPrivate.m
+        SyphonMessaging.m SyphonMessageReceiver.m SyphonMessageSender.m SyphonCFMessageReceiver.m
+        SyphonCFMessageSender.m SyphonMessageQueue.m SyphonDispatch.c)
+    list(TRANSFORM _syphon_sources PREPEND ${syphon_SOURCE_DIR}/)
+    add_library(syphon STATIC ${_syphon_sources})
+    target_include_directories(syphon SYSTEM PUBLIC ${syphon_SOURCE_DIR})
+    target_compile_definitions(syphon PRIVATE SYPHON_CORE_SHARE)
+    target_compile_options(syphon PRIVATE -fobjc-arc -include ${syphon_SOURCE_DIR}/Syphon_Prefix.pch -w)
+    target_link_libraries(syphon PUBLIC "-framework Foundation" "-framework Cocoa" "-framework IOSurface")
+endif()
+
 if(BUILD_TESTING)
     FetchContent_Declare(Catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git

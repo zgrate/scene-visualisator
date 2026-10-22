@@ -9,6 +9,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
+if(APPLE)
+    enable_language(C OBJC OBJCXX) # Syphon
+endif()
 include(cmake/deps.cmake)
 
 find_package(Qt6 6.12 REQUIRED COMPONENTS Gui GuiPrivate Quick QuickControls2 ShaderTools Multimedia Svg)
