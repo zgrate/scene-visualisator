@@ -392,3 +392,20 @@ Hard rules:
 - **Missing files:** `Session.missingFiles` lists fixture types, geometry and media that the project names but cannot
   find. `projectOpened()` shows them in a dialog. `linkedMedia` lists media linked by absolute path, and `packMedia()`
   copies it into `media/` as one undo step.
+
+## 24. AI access (MCP) and debug mode
+- **Plan:** `docs/mcp-plan.md` (decisions A1–A9). `sv_mcp` (`src/mcp`, std + Asio + nlohmann, no Qt) is an MCP
+  Streamable HTTP server: `POST /mcp` with plain JSON replies, no SSE, `Mcp-Session-Id`, Bearer token, a local-only
+  `Origin` check and a 4 MB body limit. `Server::handle(Request)` works without sockets for tests.
+- **Tools (`app/ai_access.cpp`):** `make_mcp_tools(Session&)` builds the table. Every tool hops to the UI thread
+  (`on_ui`, at most 10 s). Edits go through `Session::try_apply` and `create_object`, labelled `AI: …` by the
+  label prefix, so each is one undo step. File tools need `ai_files()` and debug tools `debug_mode()`; both are
+  `Tool::available`. Add a tool there, and a test in `session_tests.cpp` (`tool()` helper).
+- **Preferences:** `aiAccess`, `aiLan` (bind 0.0.0.0), `aiFiles`, `aiPort` (7311) and `aiToken` (32 random bytes, hex).
+  `--mcp` turns access on for one run; `--screenshot` runs never listen without it. `Session.aiStatus` feeds the
+  Project screen's `AiPanel.qml` and the title-bar `AI ●`.
+- **Debug mode:** `--debug` (this run) or the Project screen toggle (preference `debug`). It enables `sv.*.debug`, the
+  HUD (`Session.renderStats`, published by the viewport renderer every 0.5 s) and the debug tools. `main.cpp`'s
+  message handler feeds `Session::append_log`, a 2000-line ring read by `get_log` and the log card.
+- **Checks:** `tools/mcp_probe.py [--url --token]` (stdlib) runs handshake, screenshot, edit and undo against a running
+  app; ctest `mcp_e2e` runs it under Xvfb on port 7399 with scratch settings.

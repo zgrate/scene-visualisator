@@ -6,8 +6,11 @@
 
 #include <QGuiApplication>
 #include <QMouseEvent>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <map>
+#include <rhi/qrhi.h>
 
 namespace {
 
@@ -41,6 +44,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
             scene.set_composition(project && frame.size() != composition_size
                                       ? sv::render::make_composition(*project, frame)
                                       : std::move(frame));
+        const auto started = std::chrono::steady_clock::now();
         if (project) {
             for (auto &[u, b] : buffers)
                 b->update();
@@ -50,9 +54,36 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
                 return it == buffers.end() ? std::span<const std::uint8_t>()
                                            : std::span<const std::uint8_t>(it->second->front().data);
             });
-            scene.set_scene(sv::render::build_scene(*project, fixtures, selection, time, *meshes));
+            auto built = sv::render::build_scene(*project, fixtures, selection, time, *meshes);
+            counts = {int(built.boxes.size()), int(built.meshes.size()), int(built.beams.size()),
+                      int(built.walls.size())};
+            scene.set_scene(std::move(built));
         }
+        cpu_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         scene.render(cb, renderTarget());
+        publish_stats();
+    }
+
+    // Debug mode's HUD and get_render_stats: averages over about half a second, published like the meter.
+    void publish_stats() {
+        ++frames;
+        if (!stats_clock.isValid())
+            stats_clock.start();
+        if (stats_clock.elapsed() < 500)
+            return;
+        const auto info = rhi()->driverInfo();
+        Session::instance()->publish_render_stats({{"fps", frames * 1000.0 / stats_clock.elapsed()},
+                                                   {"cpuMs", cpu_ms / frames},
+                                                   {"boxes", counts[0]},
+                                                   {"meshes", counts[1]},
+                                                   {"beams", counts[2]},
+                                                   {"walls", counts[3]},
+                                                   {"backend", QString::fromLatin1(rhi()->backendName())},
+                                                   {"device", QString::fromUtf8(info.deviceName)},
+                                                   {"revision", revision}});
+        frames = 0;
+        cpu_ms = 0;
+        stats_clock.restart();
     }
 
     sv::render::SceneRenderer scene;
@@ -65,6 +96,10 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
     std::set<std::string> selection;
     std::map<std::uint16_t, sv::proto::TripleBuffer<sv::proto::UniverseFrame> *> buffers;
     double time = 0;
+    QElapsedTimer stats_clock;
+    int frames = 0;
+    double cpu_ms = 0;
+    std::array<int, 4> counts{};
 };
 
 } // namespace

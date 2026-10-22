@@ -126,6 +126,18 @@ ApplicationWindow {
                     font.pixelSize: Theme.small + 1
                 }
             }
+            Label { // AI access: green while a client has called in the last 10 s
+                visible: Session.aiStatus.listening
+                textFormat: Text.StyledText
+                text: "AI <font color='" + (Session.aiStatus.active ? Theme.ok : Theme.line) + "'>●</font>"
+                color: Theme.muted
+                font.family: Theme.mono
+                font.pixelSize: Theme.small + 1
+                ToolTip.visible: aiHover.hovered
+                ToolTip.text: qsTr("AI access: %1 client(s), last call %2").arg(Session.aiStatus.clients)
+                              .arg(Session.aiStatus.lastTool || "–")
+                HoverHandler { id: aiHover }
+            }
         }
     }
 
@@ -218,11 +230,52 @@ ApplicationWindow {
 
         ViewportItem {
             id: viewport
+            objectName: "viewport" // found by the AI screenshot and camera tools
             anchors.fill: parent
+        }
+
+        // Debug mode HUD: renderer, DMX input, media and AI access at a glance.
+        Rectangle {
+            visible: Session.debugMode && win.screen === "design"
+            anchors { left: parent.left; bottom: viewLabel.top; margins: Theme.gap }
+            width: hud.implicitWidth + 16
+            height: hud.implicitHeight + 12
+            color: Theme.panel
+            opacity: 0.92
+            border.color: Theme.line
+            radius: Theme.radius
+            Label {
+                id: hud
+                anchors.centerIn: parent
+                readonly property var r: Session.renderStats
+                readonly property var d: Session.dmxStatus
+                readonly property var m: Session.mediaStatus
+                readonly property var a: Session.aiStatus
+                text: [
+                    "DEBUG",
+                    "%1 fps · cpu %2 ms".arg((r.fps || 0).toFixed(1)).arg((r.cpuMs || 0).toFixed(2)),
+                    "boxes %1 · beams %2 · walls %3 · meshes %4".arg(r.boxes || 0).arg(r.beams || 0)
+                        .arg(r.walls || 0).arg(r.meshes || 0),
+                    (r.backend || "?") + " · " + (r.device || "").slice(0, 40)
+                ].concat(Object.keys(d.perUniverse || {}).map(u => {
+                    const p = d.perUniverse[u]
+                    return "U%1 %2 Hz · lost %3 · dropped %4 · %5".arg(u).arg(p.rate).arg(p.lost).arg(p.dropped)
+                        .arg(p.sources.join(", ") || "no source")
+                })).concat([
+                    m.kind ? "media %1 %2×%3 · %4 ms".arg(m.kind).arg(m.width).arg(m.height)
+                                 .arg((m.latency || 0).toFixed(1)) : "media –",
+                    a.listening ? "AI %1 client(s) · %2 call(s) · %3".arg(a.clients).arg(a.calls).arg(a.lastTool || "–")
+                                : "AI off"
+                ]).join("\n")
+                color: Theme.fg
+                font.family: Theme.mono
+                font.pixelSize: Theme.small
+            }
         }
 
         // HUD: view name and camera presets / bookmarks.
         Label {
+            id: viewLabel
             visible: win.screen === "design"
             anchors { left: parent.left; bottom: parent.bottom; margins: Theme.gap }
             text: viewport.view + " · FOH"

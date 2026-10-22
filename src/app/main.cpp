@@ -57,12 +57,14 @@ class FileOpenFilter : public QObject {
 
 void log_message(QtMsgType type, const QMessageLogContext &context, const QString &message) {
     static const char *levels[] = {"debug", "warning", "critical", "fatal", "info"};
+    const QString line = QStringLiteral("%1 %2 %3 %4")
+                             .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs), levels[type],
+                                  context.category ? context.category : "default", message);
+    Session::append_log(line); // the in-memory ring behind the log card and get_log
     {
         QMutexLocker lock(&log_mutex);
         if (log_file.isOpen()) {
-            log_file.write(QStringLiteral("%1 %2 %3\n")
-                               .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs), levels[type], message)
-                               .toUtf8());
+            log_file.write((line + '\n').toUtf8());
             log_file.flush();
         }
     }
@@ -110,6 +112,10 @@ int main(int argc, char *argv[]) {
     QCommandLineOption screen("screen", "Start on a screen: design, patch, dmx, plan, mapping, project.", "name",
                               "design");
     args.addOption(screen);
+    QCommandLineOption mcp("mcp", "Turn AI access (MCP) on for this run, whatever the preference says.");
+    args.addOption(mcp);
+    QCommandLineOption debug("debug", "Debug mode for this run: debug log categories, HUD and debug AI tools.");
+    args.addOption(debug);
     args.addPositionalArgument("project", "A .svproj file to open; the demo rig when omitted.");
     args.process(app);
 
@@ -139,8 +145,14 @@ int main(int argc, char *argv[]) {
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
         Qt::QueuedConnection);
     engine.loadFromModule("SceneVisualiser", "Main");
-    if (!engine.rootObjects().isEmpty())
+    if (!engine.rootObjects().isEmpty()) {
         engine.rootObjects().first()->setProperty("screen", args.value(screen));
+        session.set_window(qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+    }
+    if (args.isSet(debug) || Session::preference("debug", false).toBool())
+        session.setDebugMode(true, false);
+    if (!args.isSet(shot) || args.isSet(mcp)) // unattended screenshots never listen unless asked
+        session.start_ai(args.isSet(mcp));
 
     if (!args.isSet(shot)) // screenshots run unattended, so no update prompts
         sv::updater::start(Session::preference("updateChannel", "stable").toString());

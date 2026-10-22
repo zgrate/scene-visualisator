@@ -7,6 +7,7 @@
 #include "core/interchange.h"
 #include "core/mvr.h"
 #include "core/resolume.h"
+#include "mcp/server.h"
 #include "render/drawing_painter.h"
 #include "render/test_pattern.h"
 
@@ -144,6 +145,7 @@ Session::Session(QObject *parent) : QObject(parent) {
 }
 
 Session::~Session() {
+    stop_ai(); // before anything a tool could reach
     dmx_.stop();
     the_session = nullptr;
 }
@@ -202,14 +204,20 @@ void Session::refresh() {
 }
 
 bool Session::apply(const json &patch, const std::string &label) {
+    const std::string error = try_apply(patch, label);
+    if (!error.empty())
+        qCWarning(lcSession) << "edit" << label.c_str() << "rejected:" << error.c_str();
+    return error.empty();
+}
+
+std::string Session::try_apply(const json &patch, const std::string &label) {
     try {
-        document_.apply(patch, label);
+        document_.apply(patch, label_prefix_ + label);
     } catch (const std::exception &e) {
-        qCWarning(lcSession) << "edit" << label.c_str() << "rejected:" << e.what();
-        return false;
+        return e.what();
     }
     refresh();
-    return true;
+    return {};
 }
 
 int Session::index_of(const std::string &uuid) const {
@@ -412,43 +420,60 @@ bool Session::setPatch(const QString &uuid, const QString &text) {
         "Patch");
 }
 
-void Session::add_object(json object, const char *label) {
-    const std::string uuid = object["uuid"];
-    if (apply(json::array({{{"op", "add"}, {"path", "/objects/-"}, {"value", std::move(object)}}}), label))
-        select(uuid, false);
+std::string Session::create_object(const std::string &type, const std::string &gdtf, const std::string &mode,
+                                   const json &fields, std::string *uuid) {
+    const json &objects = document_.data().at("objects");
+    json o;
+    std::string label;
+    if (type == "fixture") {
+        const auto it = library_.find(gdtf);
+        if (it == library_.end())
+            return "Unknown fixture type " + gdtf;
+        if (!it->second.mode(mode))
+            return "Unknown mode " + mode + " of " + gdtf;
+        const int id = next_fixture_id(objects);
+        o = sv::new_fixture(it->second.name + " " + std::to_string(id), gdtf, mode);
+        o["fixtureId"] = id;
+        o["position"] = {0.0, 4.0, 0.0};
+        o["patch"] = next_patch(objects, library_, footprint(library_, o));
+        label = "Add fixture";
+    } else if (type == "wall") {
+        o = sv::new_led_wall("LED wall");
+        o["position"] = {0.0, 1.0, 0.0};
+        label = "Add LED wall";
+    } else if (type == "truss") {
+        o = sv::new_truss("Truss", "straight", 6);
+        o["position"] = {0.0, 6.0, 0.0};
+        label = "Add truss";
+    } else if (type == "strip") {
+        o = sv::new_pixel_strip("Pixel strip");
+        o["position"] = {0.0, 3.0, 0.0};
+        o["patch"] = next_patch(objects, library_, std::min(512, footprint(library_, o)));
+        label = "Add pixel strip";
+    } else
+        return "Unknown object type " + type + " (fixture, wall, truss or strip)";
+    if (fields.is_object()) {
+        const json id = o["uuid"];
+        o.merge_patch(fields);
+        o["uuid"] = id;
+    }
+    const std::string id = o["uuid"];
+    if (std::string error =
+            try_apply(json::array({{{"op", "add"}, {"path", "/objects/-"}, {"value", std::move(o)}}}), label);
+        !error.empty())
+        return error;
+    select(id, false);
+    if (uuid)
+        *uuid = id;
+    return {};
 }
 
 void Session::addFixture(const QString &gdtf, const QString &mode) {
-    const auto it = library_.find(gdtf.toStdString());
-    if (it == library_.end())
-        return;
-    const json &objects = document_.data().at("objects");
-    const int id = next_fixture_id(objects);
-    json f = sv::new_fixture(it->second.name + " " + std::to_string(id), gdtf.toStdString(), mode.toStdString());
-    f["fixtureId"] = id;
-    f["position"] = {0.0, 4.0, 0.0};
-    f["patch"] = next_patch(objects, library_, footprint(library_, f));
-    add_object(std::move(f), "Add fixture");
+    create_object("fixture", gdtf.toStdString(), mode.toStdString(), {});
 }
-
-void Session::addWall() {
-    json w = sv::new_led_wall("LED wall");
-    w["position"] = {0.0, 1.0, 0.0};
-    add_object(std::move(w), "Add LED wall");
-}
-
-void Session::addStrip() {
-    json s = sv::new_pixel_strip("Pixel strip");
-    s["position"] = {0.0, 3.0, 0.0};
-    s["patch"] = next_patch(document_.data().at("objects"), library_, std::min(512, footprint(library_, s)));
-    add_object(std::move(s), "Add pixel strip");
-}
-
-void Session::addTruss() {
-    json t = sv::new_truss("Truss", "straight", 6);
-    t["position"] = {0.0, 6.0, 0.0};
-    add_object(std::move(t), "Add truss");
-}
+void Session::addWall() { create_object("wall", {}, {}, {}); }
+void Session::addStrip() { create_object("strip", {}, {}, {}); }
+void Session::addTruss() { create_object("truss", {}, {}, {}); }
 
 void Session::duplicateSelection() {
     json patch = json::array();

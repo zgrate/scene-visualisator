@@ -16,15 +16,21 @@
 #include <QVariant>
 #include <QVector3D>
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <qqmlintegration.h>
 #include <set>
 
 class QJSEngine;
 class QQmlEngine;
+class QQuickWindow;
+namespace sv::mcp {
+class Server;
+}
 
 class Session : public QObject {
     Q_OBJECT
@@ -58,6 +64,12 @@ class Session : public QObject {
     Q_PROPERTY(
         QStringList missingFiles READ missing_files NOTIFY changed) // referenced but not found: types, geometry, media
     Q_PROPERTY(QStringList linkedMedia READ linked_media NOTIFY changed) // media linked by absolute path, not packed
+    // AI access over MCP (docs/mcp-plan.md): {enabled, lan, files, port, token, listening, error, addresses, clients,
+    // calls, lastTool, active, command}, refreshed with dmxStatus.
+    Q_PROPERTY(QVariantMap aiStatus READ ai_status NOTIFY dmxChanged)
+    Q_PROPERTY(bool debugMode READ debug_mode NOTIFY changed)
+    // Published by the render thread about twice a second: fps, ms, boxes, beams, walls, meshes, backend, device.
+    Q_PROPERTY(QVariantMap renderStats READ render_stats NOTIFY dmxChanged)
 
   public:
     explicit Session(QObject *parent); // no default: QML would construct its own instead of calling create()
@@ -192,6 +204,33 @@ class Session : public QObject {
     QStringList missing_files() const;
     QStringList linked_media() const;
 
+    // AI access. The tool table lives in ai_access.cpp; tools run on this (the UI) thread.
+    void set_window(QQuickWindow *window) { window_ = window; }
+    QQuickWindow *window() const { return window_; }
+    void start_ai(bool force); // listens if the aiAccess preference is on, or force (--mcp, this run only)
+    QVariantMap ai_status() const;
+    bool ai_files() const { return ai_files_; }
+    Q_INVOKABLE void setAiAccess(const QString &key, const QVariant &value); // enabled, lan, files, port
+    Q_INVOKABLE void regenerateAiToken();
+    bool debug_mode() const { return debug_; }
+    Q_INVOKABLE void setDebugMode(bool on, bool persist = true); // persist: keep for the next launch
+    Q_INVOKABLE QString logText(int lines, const QString &filter) const { return log_tail(lines, filter).join('\n'); }
+    Q_INVOKABLE void copyText(const QString &text) const;
+    static void append_log(const QString &line); // any thread; the last 2000 lines
+    static QStringList log_tail(int lines, const QString &filter = {});
+    void publish_render_stats(QVariantMap stats); // render thread
+    QVariantMap render_stats() const;
+    // Edits made while set are labelled "<prefix><label>" in the history ("AI: Delete").
+    void set_label_prefix(std::string prefix) { label_prefix_ = std::move(prefix); }
+    std::string try_apply(const sv::json &patch, const std::string &label); // the error, empty on success
+    // type: fixture, wall, truss or strip, with the defaults of the Add buttons; fields are merged over them. One
+    // undo step; the new object is selected. Returns the error, empty on success.
+    std::string create_object(const std::string &type, const std::string &gdtf, const std::string &mode,
+                              const sv::json &fields, std::string *uuid = nullptr);
+    // DMX the AI holds per universe, merged as an internal source; values start at the address, nullopt clears.
+    void set_ai_dmx(std::uint16_t universe, int address, const std::vector<int> &values);
+    void clear_ai_dmx(std::optional<std::uint16_t> universe);
+
   Q_SIGNALS:
     void changed();
     void dmxChanged();
@@ -204,7 +243,6 @@ class Session : public QObject {
     int index_of(const std::string &uuid) const;
     std::string path_of(const std::string &uuid) const; // "/objects/i", "/outputs/i", "/composition" or empty
     static QVariantList to_variant_list(const sv::json &array);
-    void add_object(sv::json object, const char *label);
     void add_gdtf(const std::string &name, std::vector<std::uint8_t> bytes); // throws on a bad file
     void rebuild_meshes();
     QVariantList list_of(const char *key) const; // a top-level array of the project, empty when missing
@@ -216,6 +254,8 @@ class Session : public QObject {
     void check_recovery();
     sv::Package package() const; // the document plus the GDTF types it uses and the other package files
     void load(sv::Package pkg);
+    void restart_ai(); // applies the AI preferences: stops, or (re)starts the listener
+    void stop_ai();
 
     QString name_;
     std::filesystem::path path_;
@@ -242,4 +282,15 @@ class Session : public QObject {
     std::optional<std::pair<std::string, QVector3D>> moving_;
     std::vector<sv::proto::UniverseStatus> status_;
     QTimer status_timer_;
+
+    QQuickWindow *window_ = nullptr;
+    std::unique_ptr<sv::mcp::Server> ai_;
+    bool ai_forced_ = false;
+    QString ai_error_;
+    QStringList ai_addresses_;
+    std::atomic<bool> ai_files_ = false, debug_ = false; // read by tool availability on the server thread
+    std::string label_prefix_;
+    std::map<std::uint16_t, sv::proto::Slots> ai_dmx_;
+    mutable std::mutex stats_mutex_;
+    QVariantMap render_stats_;
 };

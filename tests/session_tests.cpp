@@ -1,5 +1,7 @@
 #include "session.h"
 
+#include "ai_access.h"
+
 #include "core/interchange.h"
 #include "core/project_file.h"
 #include "media/media_source.h"
@@ -16,10 +18,12 @@
 #include <QTimer>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
 #include <fstream>
 #include <ranges>
+#include <thread>
 
 using sv::json;
 
@@ -306,6 +310,106 @@ TEST_CASE(
     CHECK(t.media().latest(serial).isNull()); // nothing newer yet
     t.undo();                                 // back to the still: the live source stops
     CHECK_FALSE(t.media().active());
+}
+
+namespace {
+// Runs one AI tool as the MCP server would: its result, with isError turned into an exception.
+json tool(const std::vector<sv::mcp::Tool> &tools, const std::string &name, const json &args = json::object()) {
+    for (const auto &t : tools)
+        if (t.name == name) {
+            json r = t.run(args);
+            if (r.value("isError", false))
+                throw std::runtime_error(r["content"][0]["text"].get<std::string>());
+            return r.contains("structuredContent") ? r["structuredContent"] : r["content"][0];
+        }
+    FAIL("no tool " << name);
+    throw;
+}
+} // namespace
+
+TEST_CASE("AI tools: every edit is one undo step labelled AI, errors come back as tool errors") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const auto tools = make_mcp_tools(s);
+    const std::size_t steps = s.document().cursor();
+
+    const json fixtures = tool(tools, "list_objects", {{"type", "fixture"}})["objects"];
+    REQUIRE(fixtures.size() == 19);
+    const std::string uuid = fixtures[0]["uuid"];
+    tool(tools, "edit_object", {{"uuid", uuid}, {"pointer", "/position/1"}, {"value", 7.5}});
+    CHECK(object(s, QString::fromStdString(uuid))["position"][1] == 7.5);
+    CHECK(s.document().cursor() == steps + 1);
+    CHECK(s.document().history().back().label == "AI: Edit /position/1");
+
+    const json wall = tool(tools, "add_object", {{"type", "wall"}, {"fields", {{"name", "AI wall"}}}});
+    CHECK(wall["name"] == "AI wall");
+    CHECK(s.document().history()[s.document().cursor() - 1].label.starts_with("AI: "));
+    tool(tools, "set_patch", {{"uuid", uuid}, {"patch", "3.101"}});
+    CHECK(object(s, QString::fromStdString(uuid))["patch"] == json({{"universe", 3}, {"address", 101}}));
+    CHECK(s.document().cursor() == steps + 3);
+
+    CHECK(tool(tools, "undo")["undone"].get<std::string>().starts_with("AI: "));
+    CHECK(tool(tools, "undo")["undone"] == "AI: Add LED wall");
+    CHECK(s.document().cursor() == steps + 1);
+    s.addTruss(); // user edits keep their plain labels
+    CHECK_FALSE(s.document().history().back().label.starts_with("AI: "));
+
+    CHECK_THROWS_WITH(tool(tools, "get_object", {{"uuid", "nope"}}), "No object, output or composition with uuid nope");
+    CHECK_THROWS(tool(tools, "apply_patch", {{"patch", {{{"op", "remove"}, {"path", "/missing"}}}}}));
+    CHECK(s.document().history().back().label == "Add truss"); // the failed patch left no step
+    CHECK_THROWS_WITH(tool(tools, "screenshot"), "No window (the app runs without one)");
+    CHECK(tool(tools, "get_fixture", {{"uuid", uuid}})["channels"].size() > 0);
+
+    // File and debug tools exist but are switched off by default.
+    const auto open = std::ranges::find(tools, std::string("open_project"), &sv::mcp::Tool::name);
+    const auto log = std::ranges::find(tools, std::string("get_log"), &sv::mcp::Tool::name);
+    CHECK_FALSE(open->available());
+    CHECK_FALSE(log->available());
+    s.setDebugMode(true, false);
+    CHECK(log->available());
+    Session::append_log("info sv.test ai tools marker"); // main.cpp's message handler does this in the app
+    CHECK(tool(tools, "get_log", {{"filter", "AI TOOLS MARKER"}})["text"] == "info sv.test ai tools marker");
+    s.setDebugMode(false, false);
+}
+
+TEST_CASE("AI tools called from another thread run on the UI thread and wait for it") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const auto tools = make_mcp_tools(s);
+    json result;
+    std::thread caller([&] { result = tool(tools, "add_object", {{"type", "truss"}}); });
+    QElapsedTimer t;
+    t.start();
+    while (result.is_null() && t.elapsed() < 5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    caller.join();
+    CHECK(result["type"] == "truss");
+    CHECK(s.document().history().back().label.starts_with("AI: "));
+}
+
+TEST_CASE("AI set_dmx holds values that get_dmx reads back merged; clear_dmx releases them") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    try {
+        s.dmx().start();
+    } catch (const std::exception &e) {
+        SKIP("DMX ports busy: " << e.what());
+    }
+    const auto tools = make_mcp_tools(s);
+    CHECK(tool(tools, "set_dmx", {{"universe", 1}, {"address", 10}, {"values", {255, 7}}})["patched"] == true);
+    CHECK_THROWS(tool(tools, "set_dmx", {{"universe", 1}, {"address", 512}, {"values", {1, 2}}}));
+    const auto read = [&] { return tool(tools, "get_dmx", {{"universe", 1}, {"from", 10}, {"count", 2}})["values"]; };
+    QElapsedTimer t;
+    t.start();
+    while (read() != json({255, 7}) && t.elapsed() < 3000)
+        QThread::msleep(20);
+    CHECK(read() == json({255, 7}));
+    tool(tools, "clear_dmx");
+    t.restart();
+    while (read() != json({0, 0}) && t.elapsed() < 3000)
+        QThread::msleep(20);
+    CHECK(read() == json({0, 0}));
+    CHECK_THROWS(tool(tools, "get_dmx", {{"universe", 40}}));
 }
 
 int main(int argc, char *argv[]) {

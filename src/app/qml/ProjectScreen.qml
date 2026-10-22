@@ -201,206 +201,210 @@ Rectangle {
         topPadding: 6
     }
 
-    Rectangle {
+    Row {
         anchors.centerIn: parent
-        width: 540
-        height: col.implicitHeight + 32
-        color: Theme.panel
-        border.color: Theme.line
-        radius: Theme.radius
-        ColumnLayout {
-            id: col
-            anchors { fill: parent; margins: 16 }
-            spacing: 10
-            Label { text: qsTr("PROJECT"); color: Theme.muted; font.pixelSize: Theme.small; font.letterSpacing: 1 }
-            Label {
-                text: Session.projectName + (Session.dirty ? " •" : "")
-                color: Theme.fg
-                font.pixelSize: 16
-                font.bold: true
-            }
-            Label {
-                text: Session.filePath || qsTr("Not saved yet")
-                color: Theme.muted
-                font.family: Theme.mono
-                font.pixelSize: Theme.small + 1
-                elide: Text.ElideMiddle
-                Layout.fillWidth: true
-            }
-            RowLayout {
-                spacing: 6
-                Button {
-                    text: qsTr("New")
-                    onClicked: screen.guard(() => { Session.newProject(); screen.report("", qsTr("New project")) })
+        spacing: 16
+        Rectangle {
+            width: 540
+            height: col.implicitHeight + 32
+            color: Theme.panel
+            border.color: Theme.line
+            radius: Theme.radius
+            ColumnLayout {
+                id: col
+                anchors { fill: parent; margins: 16 }
+                spacing: 10
+                Label { text: qsTr("PROJECT"); color: Theme.muted; font.pixelSize: Theme.small; font.letterSpacing: 1 }
+                Label {
+                    text: Session.projectName + (Session.dirty ? " •" : "")
+                    color: Theme.fg
+                    font.pixelSize: 16
+                    font.bold: true
                 }
-                Button { text: qsTr("Open…"); onClicked: screen.open() }
-                Button { text: qsTr("Save"); onClicked: screen.save() }
-                Button { text: qsTr("Save as…"); onClicked: screen.saveAs() }
-            }
-            RowLayout {
-                visible: Session.linkedMedia.length > 0
-                spacing: 6
+                Label {
+                    text: Session.filePath || qsTr("Not saved yet")
+                    color: Theme.muted
+                    font.family: Theme.mono
+                    font.pixelSize: Theme.small + 1
+                    elide: Text.ElideMiddle
+                    Layout.fillWidth: true
+                }
+                RowLayout {
+                    spacing: 6
+                    Button {
+                        text: qsTr("New")
+                        onClicked: screen.guard(() => { Session.newProject(); screen.report("", qsTr("New project")) })
+                    }
+                    Button { text: qsTr("Open…"); onClicked: screen.open() }
+                    Button { text: qsTr("Save"); onClicked: screen.save() }
+                    Button { text: qsTr("Save as…"); onClicked: screen.saveAs() }
+                }
+                RowLayout {
+                    visible: Session.linkedMedia.length > 0
+                    spacing: 6
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Linked, not in the project: %1").arg(Session.linkedMedia.join(", "))
+                        color: Theme.warn
+                        elide: Text.ElideMiddle
+                        font.pixelSize: Theme.small + 1
+                    }
+                    Button {
+                        text: qsTr("Pack into project")
+                        onClicked: screen.report(Session.packMedia(), qsTr("Media packed; save to keep it"))
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Copies the file into the .svproj so the project opens on another computer")
+                    }
+                }
+                Section { text: qsTr("RECENT"); visible: Session.recentFiles.length > 0 }
+                Repeater {
+                    model: Session.recentFiles
+                    delegate: ItemDelegate {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        padding: 4
+                        contentItem: RowLayout {
+                            spacing: 8
+                            Label { text: modelData.name; color: Theme.fg; font.pixelSize: Theme.small + 2 }
+                            Label {
+                                Layout.fillWidth: true
+                                text: modelData.path
+                                color: Theme.muted
+                                elide: Text.ElideMiddle
+                                font.family: Theme.mono
+                                font.pixelSize: Theme.small
+                            }
+                        }
+                        onClicked: screen.openUrl(modelData.url)
+                    }
+                }
+                Section { text: qsTr("IMPORT") }
+                RowLayout {
+                    spacing: 6
+                    Button { text: qsTr("GDTF…"); onClicked: gdtfDialog.open() }
+                    Button { text: qsTr("Resolume screens…"); onClicked: resolumeDialog.open() }
+                    Label { text: qsTr("pitch mm"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
+                    Input {
+                        id: pitch
+                        implicitWidth: 48
+                        text: "3.9"
+                        font.family: Theme.mono
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Pixel pitch for new walls and strips; also scales their placement")
+                    }
+                    Check { id: place; text: qsTr("Place from composition"); checked: true }
+                }
+                RowLayout {
+                    spacing: 6
+                    Button { text: qsTr("OBJ set piece…"); onClicked: objDialog.open() }
+                    ComboBox {
+                        id: unit
+                        implicitWidth: 64
+                        model: ["m", "cm", "mm", "in", "ft"]
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Unit the OBJ file is in")
+                    }
+                    Check { id: zUp; text: qsTr("Z up") }
+                    Check { id: split; text: qsTr("Split groups") }
+                }
+                RowLayout {
+                    spacing: 6
+                    Button { text: qsTr("MVR scene…"); onClicked: mvrDialog.open() }
+                    Button {
+                        text: qsTr("FBX scene…")
+                        onClicked: fbxDialog.open()
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Set pieces per mesh, hierarchy kept; units and axes converted")
+                    }
+                    Button {
+                        text: qsTr("Patch CSV…")
+                        onClicked: csvDialog.open()
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Our patch CSV, Capture or Vectorworks lists; matching fixture IDs are updated")
+                    }
+                }
+                Section { text: qsTr("EXPORT") }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Button { text: qsTr("Patch CSV…"); onClicked: screen.exportAs("csv") }
+                    Button { text: qsTr("grandMA3 patch…"); onClicked: screen.exportAs("ma3") }
+                    Button { text: qsTr("Resolume output…"); onClicked: screen.exportAs("resolume") }
+                    Button {
+                        text: qsTr("Send to Resolume")
+                        onClicked: {
+                            const p = Session.resolumePreset()
+                            if (p.exists) { overwrite.preset = p; overwrite.open() }
+                            else screen.report(Session.exportFile("resolume", p.url), qsTr("Preset written: %1").arg(p.path))
+                        }
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Writes an Advanced Output preset; pick it once in Arena's Advanced Output")
+                    }
+                    Button { text: qsTr("MVR scene…"); onClicked: screen.exportAs("mvr") }
+                    Button { text: qsTr("OBJ scene…"); onClicked: screen.exportAs("obj") }
+                    Button {
+                        text: qsTr("OBJ selection…")
+                        enabled: Session.selectionCount > 0
+                        onClicked: screen.exportAs("objSelection")
+                    }
+                    Button { text: qsTr("FBX scene…"); onClicked: screen.exportAs("fbx") }
+                    Button {
+                        text: qsTr("FBX selection…")
+                        enabled: Session.selectionCount > 0
+                        onClicked: screen.exportAs("fbxSelection")
+                    }
+                }
+                Section { text: qsTr("ABOUT") }
                 Label {
                     Layout.fillWidth: true
-                    text: qsTr("Linked, not in the project: %1").arg(Session.linkedMedia.join(", "))
-                    color: Theme.warn
-                    elide: Text.ElideMiddle
+                    wrapMode: Text.Wrap
+                    text: qsTr("Scene Visualiser %1 · LGPL-3.0-or-later. Qt 6 (LGPL v3, shared libraries). NDI® runtime "
+                               + "not shipped, SDK headers MIT; Spout reader own code; Syphon BSD; Sentry MIT.")
+                          .arg(Session.appInfo.version)
+                    color: Theme.muted
                     font.pixelSize: Theme.small + 1
                 }
-                Button {
-                    text: qsTr("Pack into project")
-                    onClicked: screen.report(Session.packMedia(), qsTr("Media packed; save to keep it"))
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Copies the file into the .svproj so the project opens on another computer")
-                }
-            }
-            Section { text: qsTr("RECENT"); visible: Session.recentFiles.length > 0 }
-            Repeater {
-                model: Session.recentFiles
-                delegate: ItemDelegate {
-                    required property var modelData
-                    Layout.fillWidth: true
-                    padding: 4
-                    contentItem: RowLayout {
-                        spacing: 8
-                        Label { text: modelData.name; color: Theme.fg; font.pixelSize: Theme.small + 2 }
-                        Label {
-                            Layout.fillWidth: true
-                            text: modelData.path
-                            color: Theme.muted
-                            elide: Text.ElideMiddle
-                            font.family: Theme.mono
-                            font.pixelSize: Theme.small
-                        }
+                RowLayout {
+                    spacing: 6
+                    visible: Session.appInfo.updates
+                    Button { text: qsTr("Check for updates"); onClicked: Session.checkForUpdates() }
+                    Check {
+                        text: qsTr("Automatically")
+                        checked: Session.preference("autoUpdate", false)
+                        onToggled: Session.setPreference("autoUpdate", checked)
                     }
-                    onClicked: screen.openUrl(modelData.url)
-                }
-            }
-            Section { text: qsTr("IMPORT") }
-            RowLayout {
-                spacing: 6
-                Button { text: qsTr("GDTF…"); onClicked: gdtfDialog.open() }
-                Button { text: qsTr("Resolume screens…"); onClicked: resolumeDialog.open() }
-                Label { text: qsTr("pitch mm"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
-                Input {
-                    id: pitch
-                    implicitWidth: 48
-                    text: "3.9"
-                    font.family: Theme.mono
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Pixel pitch for new walls and strips; also scales their placement")
-                }
-                Check { id: place; text: qsTr("Place from composition"); checked: true }
-            }
-            RowLayout {
-                spacing: 6
-                Button { text: qsTr("OBJ set piece…"); onClicked: objDialog.open() }
-                ComboBox {
-                    id: unit
-                    implicitWidth: 64
-                    model: ["m", "cm", "mm", "in", "ft"]
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Unit the OBJ file is in")
-                }
-                Check { id: zUp; text: qsTr("Z up") }
-                Check { id: split; text: qsTr("Split groups") }
-            }
-            RowLayout {
-                spacing: 6
-                Button { text: qsTr("MVR scene…"); onClicked: mvrDialog.open() }
-                Button {
-                    text: qsTr("FBX scene…")
-                    onClicked: fbxDialog.open()
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Set pieces per mesh, hierarchy kept; units and axes converted")
-                }
-                Button {
-                    text: qsTr("Patch CSV…")
-                    onClicked: csvDialog.open()
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Our patch CSV, Capture or Vectorworks lists; matching fixture IDs are updated")
-                }
-            }
-            Section { text: qsTr("EXPORT") }
-            Flow {
-                Layout.fillWidth: true
-                spacing: 6
-                Button { text: qsTr("Patch CSV…"); onClicked: screen.exportAs("csv") }
-                Button { text: qsTr("grandMA3 patch…"); onClicked: screen.exportAs("ma3") }
-                Button { text: qsTr("Resolume output…"); onClicked: screen.exportAs("resolume") }
-                Button {
-                    text: qsTr("Send to Resolume")
-                    onClicked: {
-                        const p = Session.resolumePreset()
-                        if (p.exists) { overwrite.preset = p; overwrite.open() }
-                        else screen.report(Session.exportFile("resolume", p.url), qsTr("Preset written: %1").arg(p.path))
+                    ComboBox {
+                        implicitWidth: 90
+                        model: [qsTr("Stable"), qsTr("Test")]
+                        currentIndex: Session.preference("updateChannel", "stable") === "test" ? 1 : 0
+                        onActivated: i => Session.setPreference("updateChannel", i ? "test" : "stable")
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Update channel; applies at the next launch")
                     }
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Writes an Advanced Output preset; pick it once in Arena's Advanced Output")
                 }
-                Button { text: qsTr("MVR scene…"); onClicked: screen.exportAs("mvr") }
-                Button { text: qsTr("OBJ scene…"); onClicked: screen.exportAs("obj") }
-                Button {
-                    text: qsTr("OBJ selection…")
-                    enabled: Session.selectionCount > 0
-                    onClicked: screen.exportAs("objSelection")
-                }
-                Button { text: qsTr("FBX scene…"); onClicked: screen.exportAs("fbx") }
-                Button {
-                    text: qsTr("FBX selection…")
-                    enabled: Session.selectionCount > 0
-                    onClicked: screen.exportAs("fbxSelection")
-                }
-            }
-            Section { text: qsTr("ABOUT") }
-            Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: qsTr("Scene Visualiser %1 · LGPL-3.0-or-later. Qt 6 (LGPL v3, shared libraries). NDI® runtime "
-                           + "not shipped, SDK headers MIT; Spout reader own code; Syphon BSD; Sentry MIT.")
-                      .arg(Session.appInfo.version)
-                color: Theme.muted
-                font.pixelSize: Theme.small + 1
-            }
-            RowLayout {
-                spacing: 6
-                visible: Session.appInfo.updates
-                Button { text: qsTr("Check for updates"); onClicked: Session.checkForUpdates() }
                 Check {
-                    text: qsTr("Automatically")
-                    checked: Session.preference("autoUpdate", false)
-                    onToggled: Session.setPreference("autoUpdate", checked)
+                    visible: Session.appInfo.crashUploads
+                    text: qsTr("Send crash reports")
+                    checked: Session.preference("crashReports", false)
+                    onToggled: Session.setPreference("crashReports", checked)
                 }
-                ComboBox {
-                    implicitWidth: 90
-                    model: [qsTr("Stable"), qsTr("Test")]
-                    currentIndex: Session.preference("updateChannel", "stable") === "test" ? 1 : 0
-                    onActivated: i => Session.setPreference("updateChannel", i ? "test" : "stable")
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Update channel; applies at the next launch")
+                Label {
+                    Layout.fillWidth: true
+                    text: qsTr("Crash reports: %1").arg(Session.appInfo.crashFolder)
+                    color: Theme.muted
+                    font.family: Theme.mono
+                    font.pixelSize: Theme.small + 1
+                    elide: Text.ElideMiddle
                 }
-            }
-            Check {
-                visible: Session.appInfo.crashUploads
-                text: qsTr("Send crash reports")
-                checked: Session.preference("crashReports", false)
-                onToggled: Session.setPreference("crashReports", checked)
-            }
-            Label {
-                Layout.fillWidth: true
-                text: qsTr("Crash reports: %1").arg(Session.appInfo.crashFolder)
-                color: Theme.muted
-                font.family: Theme.mono
-                font.pixelSize: Theme.small + 1
-                elide: Text.ElideMiddle
-            }
-            Label {
-                visible: screen.message !== ""
-                text: screen.message
-                color: screen.failed ? Theme.err : Theme.ok
-                wrapMode: Text.Wrap
-                Layout.fillWidth: true
+                Label {
+                    visible: screen.message !== ""
+                    text: screen.message
+                    color: screen.failed ? Theme.err : Theme.ok
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
             }
         }
+        AiPanel {}
     }
 }
