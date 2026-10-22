@@ -291,6 +291,48 @@ Rectangle {
                     onClicked: screen.exportAs("fbxSelection")
                 }
             }
+            Section { text: qsTr("ABOUT") }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: qsTr("Scene Visualiser %1 · LGPL-3.0-or-later. Qt 6 (LGPL v3, shared libraries). NDI® runtime "
+                           + "not shipped, SDK headers MIT; Spout reader own code; Syphon BSD; Sentry MIT.")
+                      .arg(Session.appInfo.version)
+                color: Theme.muted
+                font.pixelSize: Theme.small + 1
+            }
+            RowLayout {
+                spacing: 6
+                visible: Session.appInfo.updates
+                Button { text: qsTr("Check for updates"); onClicked: Session.checkForUpdates() }
+                Check {
+                    text: qsTr("Automatically")
+                    checked: Session.preference("autoUpdate", false)
+                    onToggled: Session.setPreference("autoUpdate", checked)
+                }
+                ComboBox {
+                    implicitWidth: 90
+                    model: [qsTr("Stable"), qsTr("Test")]
+                    currentIndex: Session.preference("updateChannel", "stable") === "test" ? 1 : 0
+                    onActivated: i => Session.setPreference("updateChannel", i ? "test" : "stable")
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Update channel; applies at the next launch")
+                }
+            }
+            Check {
+                visible: Session.appInfo.crashUploads
+                text: qsTr("Send crash reports")
+                checked: Session.preference("crashReports", false)
+                onToggled: Session.setPreference("crashReports", checked)
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Crash reports: %1").arg(Session.appInfo.crashFolder)
+                color: Theme.muted
+                font.family: Theme.mono
+                font.pixelSize: Theme.small + 1
+                elide: Text.ElideMiddle
+            }
             Label {
                 visible: screen.message !== ""
                 text: screen.message

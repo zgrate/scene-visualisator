@@ -1,4 +1,6 @@
+#include "crash_reports.h"
 #include "session.h"
+#include "updater.h"
 
 #include "render/test_pattern.h"
 
@@ -78,9 +80,11 @@ int main(int argc, char *argv[]) {
 #endif
     QGuiApplication app(argc, argv);
     QGuiApplication::setApplicationName("Scene Visualiser");
-    QGuiApplication::setApplicationVersion(QStringLiteral("0.2.0"));
+    QGuiApplication::setApplicationVersion(QStringLiteral(SV_VERSION));
     QQuickStyle::setStyle("Fusion");
     open_log();
+    sv::crash::start(Session::app_info()["crashFolder"].toString(),
+                     Session::preference("crashReports", false).toBool());
 
     QCommandLineParser args;
     args.addHelpOption();
@@ -122,6 +126,9 @@ int main(int argc, char *argv[]) {
     if (!engine.rootObjects().isEmpty())
         engine.rootObjects().first()->setProperty("screen", args.value(screen));
 
+    if (!args.isSet(shot)) // screenshots run unattended, so no update prompts
+        sv::updater::start(Session::preference("updateChannel", "stable").toString());
+
     if (args.isSet(shot) && !engine.rootObjects().isEmpty()) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         const QString path = args.value(shot);
@@ -142,5 +149,8 @@ int main(int argc, char *argv[]) {
             },
             Qt::SingleShotConnection);
     }
-    return app.exec();
+    const int code = app.exec();
+    sv::updater::stop();
+    sv::crash::stop();
+    return code;
 }

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened runtime, not sandboxed. The network entitlements matter only if the app is ever sandboxed, but they
+     document the UDP receive (Art-Net 6454, sACN 5568) and NDI. The NDI runtime is a third-party dylib loaded at run
+     time, so library validation is off. -->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.network.client</key><true/>
+    <key>com.apple.security.network.server</key><true/>
+    <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict>
+</plist>

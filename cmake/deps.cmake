@@ -80,6 +80,24 @@ if(APPLE AND SV_WITH_SYPHON)
     target_link_libraries(syphon PUBLIC "-framework Foundation" "-framework Cocoa" "-framework IOSurface")
 endif()
 
+# Opt-in crash uploads (B7), only when release CI passes a DSN. Crashpad needs libcurl on Linux, which is dev only,
+# so Linux uses the in-process backend without uploads.
+if(SV_SENTRY_DSN)
+    if(UNIX AND NOT APPLE)
+        set(SENTRY_BACKEND inproc CACHE STRING "" FORCE)
+        set(SENTRY_TRANSPORT none CACHE STRING "" FORCE)
+    endif()
+    set(SENTRY_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(SENTRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SENTRY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(sentry
+        GIT_REPOSITORY https://github.com/getsentry/sentry-native.git
+        GIT_TAG 0.17.4
+        GIT_SHALLOW TRUE
+        SYSTEM)
+    FetchContent_MakeAvailable(sentry)
+endif()
+
 if(BUILD_TESTING)
     FetchContent_Declare(Catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git

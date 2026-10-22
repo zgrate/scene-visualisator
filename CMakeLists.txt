@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(SceneVisualiser VERSION 0.2.0 LANGUAGES CXX)
+project(SceneVisualiser VERSION 0.3.0 LANGUAGES CXX)
 
 # Executables land in build/<preset>/bin; the QML module folder of the same name stays in src/app.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

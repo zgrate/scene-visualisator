@@ -254,7 +254,7 @@ Hard rules:
   project. Main.qml offers Recover/Discard when `recoveryFile` is set. Recovery keeps the real path, so the next save
   replaces the real file.
 - **Log:** every Qt message also goes to `AppDataLocation/logs/scene-visualiser.log`, rotated at launch (three kept).
-- **Release artefacts:** CI packs Windows (windeployqt, zip) and macOS (macdeployqt, dmg) builds, unsigned.
+- **Release artefacts:** CI packs Windows (windeployqt, zip and MSI) and a universal macOS dmg. See section 22.
 
 ## 16. Resolume and mapping (B3)
 - **`core/resolume.h`:** `resolume_import(xml, options)` reads an Arena Advanced Output preset into outputs, walls and
@@ -347,3 +347,35 @@ Hard rules:
 - **NativeReceiver:** one file per platform defines `create` and `senders`; `native_receiver_none.cpp` covers Linux.
 - **Latency (NFR-3):** `MediaStatus::latency_ms` is the smoothed time from a frame's arrival to the render thread
   taking it. The Media card shows it next to the frame rate.
+
+## 22. Installers, updates and crash reports (B7, AT-7)
+- **Version:** `project(... VERSION)` in the top `CMakeLists.txt` is the one source. It reaches the app as `SV_VERSION`,
+  the MSI as `-d Version=` and the appcast as the tag. `Session.appInfo` gives QML `version`, `updates`, `crashUploads`
+  and `crashFolder`. The Project screen's ABOUT section shows them with the licence notes.
+- **Preferences:** `Session.preference(key, fallback)` and `setPreference` read and write `QSettings`, not the project.
+  The keys are `autoUpdate`, `updateChannel` (`stable` or `test`, used at the next launch) and `crashReports`.
+- **Updates (`app/updater.h`):** WinSparkle 0.9.4 on Windows and Sparkle 2.10.0 on macOS, both checking one EdDSA key.
+  They are compiled in only when `SV_APPCAST_BASE` and `SV_WINSPARKLE_DIR` or `SV_SPARKLE_DIR` are set (CI downloads
+  both). The feed is `<base>/appcast.xml`, or `appcast-test.xml` for the Test channel. Linux and local builds get
+  stubs, and `--screenshot` never starts the updater.
+- **Appcast (`tools/make_appcast.py`):** `keygen` prints a key pair. `build` writes one item with one signed enclosure
+  per installer (msi/exe windows, dmg/zip macos). The `appcast_tool` ctest runs its self-test and skips (77) without
+  `cryptography`. On a `v*` tag, CI's release job creates the GitHub release and pushes the feed to `gh-pages`;
+  `-test` tags become prereleases on the Test feed.
+- **Crash reports (`app/crash_reports.h`):** with `SV_SENTRY_DSN`, Sentry Native 0.17.4 (FetchContent) starts with
+  `require_user_consent`, and the ABOUT opt-in gives or revokes consent. Linux builds use the inproc backend with no
+  transport, because crashpad needs libcurl. Without a DSN, Windows writes a minidump per crash to `crashFolder`, and
+  macOS and Linux leave it to the OS.
+- **Windows installer (`installer/windows/SceneVisualiser.wxs`, WiX 5):** per machine, MajorUpgrade, the `.svproj`
+  association, a Start-menu shortcut, and a private-profile firewall exception for the program (Art-Net, sACN, NDI).
+  It has no dialog UI.
+- **macOS:** `installer/macos/Info.plist.in` declares local-network use, `_ndi._tcp` Bonjour, the `.svproj` document
+  type and `SUPublicEDKey`. CI builds `arm64;x86_64`, then signs inside-out with `entitlements.plist` and the hardened
+  runtime, notarizes and staples, but only when the `MACOS_*` secrets exist. Otherwise the dmg is unsigned.
+- **CI secrets and variables:** `vars.SV_UPDATE_PUBLIC_KEY`, `secrets.SPARKLE_ED_PRIVATE_KEY`, `secrets.SV_SENTRY_DSN`,
+  `MACOS_CERT_P12` (base64), `MACOS_CERT_PASSWORD`, `MACOS_SIGN_IDENTITY`, and `MACOS_NOTARY_KEY` (base64 .p8),
+  `MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER`. Windows uses Azure Trusted Signing, which signs the exe, the DLLs
+  and then the MSI, and needs `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT`,
+  `AZURE_SIGNING_ACCOUNT` and `AZURE_CERT_PROFILE`. Every signing step is skipped while its secrets are missing.
+- **Opt-in:** Sparkle and WinSparkle both ask before the first automatic check (NFR-9). Crash uploads are off until
+  the ABOUT checkbox is ticked.

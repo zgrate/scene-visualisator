@@ -53,6 +53,7 @@ class Session : public QObject {
     Q_PROPERTY(QStringList resolumeWarnings READ resolume_warnings NOTIFY changed) // from the last import
     // Composition source state (FR-13): {kind, width, height, fps, signal, error}, refreshed with dmxStatus.
     Q_PROPERTY(QVariantMap mediaStatus READ media_status NOTIFY dmxChanged)
+    Q_PROPERTY(QVariantMap appInfo READ app_info CONSTANT) // version, updates/crash upload support, crash folder (B7)
 
   public:
     explicit Session(QObject *parent); // no default: QML would construct its own instead of calling create()
@@ -165,6 +166,13 @@ class Session : public QObject {
     QVariantList drawings() const { return list_of("drawings"); }
     Q_INVOKABLE void setDrawing(const QString &kind, const QString &key, const QVariant &value); // one undo step
     Q_INVOKABLE QString exportDrawing(const QString &kind, const QUrl &url); // .pdf or .svg by suffix
+
+    // App preferences (not the project): updateChannel ("stable"/"test", next launch), autoUpdate (kept by the
+    // updater library), crashReports (opt-in uploads, B7).
+    Q_INVOKABLE static QVariant preference(const QString &key, const QVariant &fallback = {});
+    Q_INVOKABLE static void setPreference(const QString &key, const QVariant &value);
+    Q_INVOKABLE static void checkForUpdates();
+    static QVariantMap app_info();
     // FR-22: merges an MVR scene in one undo step; objects whose UUID already exists get a new one.
     Q_INVOKABLE QString importMvr(const QUrl &url);
     // FR-23: {header, rows (first 8), mapping {field: column}, fields, error} for the CSV mapping dialog.

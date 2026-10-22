@@ -1,5 +1,15 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    tags: ['v*']
+    branches: ['**']
+  pull_request:
+
+env:
+  # B7 updates: the appcasts live on this repo's GitHub Pages. Empty key or DSN builds without that feature.
+  APPCAST_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+  SV_UPDATE_PUBLIC_KEY: ${{ vars.SV_UPDATE_PUBLIC_KEY }}
+  SV_SENTRY_DSN: ${{ secrets.SV_SENTRY_DSN }}
 
 jobs:
   build:
@@ -11,6 +21,8 @@ jobs:
           - { os: windows-2022, preset: win-msvc, app: build/win-msvc/bin/Release/SceneVisualiser.exe }
           - { os: macos-14, preset: mac, app: build/mac/bin/SceneVisualiser.app/Contents/MacOS/SceneVisualiser }
     runs-on: ${{ matrix.os }}
+    env:
+      WIN_SIGN: ${{ secrets.AZURE_CLIENT_ID != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,7 +43,27 @@ jobs:
           aqtversion: '==3.3.*'
           cache: true
 
-      - run: cmake --preset ${{ matrix.preset }}
+      - name: Updater SDKs
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          mkdir -p sdk && cd sdk
+          if [ "$RUNNER_OS" = Windows ]; then
+            curl -fsSLO https://github.com/vslavik/winsparkle/releases/download/v0.9.4/WinSparkle-0.9.4.zip
+            7z x -y WinSparkle-0.9.4.zip >/dev/null
+            echo "UPDATER_FLAG=-DSV_WINSPARKLE_DIR=$PWD/WinSparkle-0.9.4" >> $GITHUB_ENV
+          else
+            curl -fsSLO https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz
+            mkdir Sparkle && tar -xf Sparkle-2.10.0.tar.xz -C Sparkle
+            echo "UPDATER_FLAG=-DSV_SPARKLE_DIR=$PWD/Sparkle" >> $GITHUB_ENV
+          fi
+      - name: Configure
+        shell: bash
+        run: |
+          extra=()
+          [ "$RUNNER_OS" = macOS ] && extra+=("-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64")  # universal
+          cmake --preset ${{ matrix.preset }} "${extra[@]}" $UPDATER_FLAG -DSV_APPCAST_BASE=$APPCAST_BASE \
+            -DSV_UPDATE_PUBLIC_KEY=$SV_UPDATE_PUBLIC_KEY -DSV_SENTRY_DSN=$SV_SENTRY_DSN
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
       # AT-4: the session tests leave the demo rig as FBX and OBJ in the temp folder; Blender must open both.
@@ -61,7 +93,8 @@ jobs:
             build/*/tests/render_golden_actual.png
           if-no-files-found: warn
 
-      # Alpha release artefacts: unsigned, Qt deployed next to the app (LGPL v3, dynamic linking). Signing is Beta.
+      # Release artefacts: Qt deployed next to the app as shared libraries (LGPL v3). B7: MSI on Windows; on macOS
+      # signed, notarized and stapled when the signing secrets exist, unsigned otherwise.
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -69,15 +102,127 @@ jobs:
           mkdir -p dist/SceneVisualiser && cp ${{ matrix.app }} dist/SceneVisualiser/
           windeployqt --release --qmldir src/app/qml dist/SceneVisualiser/SceneVisualiser.exe
           cp COPYING COPYING.LESSER dist/SceneVisualiser/
+      # Azure Trusted Signing, skipped until the AZURE_* secrets exist.
+      - name: Sign binaries (Windows)
+        if: runner.os == 'Windows' && env.WIN_SIGN == 'true'
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: dist/SceneVisualiser
+          files-folder-filter: exe,dll
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: MSI (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
           (cd dist && 7z a ../SceneVisualiser-windows.zip SceneVisualiser)
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.Firewall.wixext/5.0.2
+          version=$(sed -n 's/^project(SceneVisualiser VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          wix build installer/windows/SceneVisualiser.wxs -ext WixToolset.Firewall.wixext -arch x64 \
+            -d Version=$version -d Dist=dist/SceneVisualiser -o SceneVisualiser-windows.msi
+      - name: Sign MSI (Windows)
+        if: runner.os == 'Windows' && env.WIN_SIGN == 'true'
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}
+          files-folder-filter: msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
       - name: Package (macOS)
         if: runner.os == 'macOS'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}            # base64 Developer ID Application certificate
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          SIGN_ID: ${{ secrets.MACOS_SIGN_IDENTITY }}         # "Developer ID Application: Name (TEAMID)"
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}          # base64 App Store Connect API key (.p8)
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
         run: |
-          macdeployqt build/mac/bin/SceneVisualiser.app -qmldir=src/app/qml -dmg
-          mv build/mac/bin/SceneVisualiser.dmg SceneVisualiser-macos.dmg
+          app=build/mac/bin/SceneVisualiser.app
+          macdeployqt $app -qmldir=src/app/qml
+          if [ -n "$CERT_P12" ]; then
+            kc=$RUNNER_TEMP/sign.keychain-db
+            security create-keychain -p ci $kc && security set-keychain-settings $kc && security unlock-keychain -p ci $kc
+            echo "$CERT_P12" | base64 --decode > $RUNNER_TEMP/cert.p12
+            security import $RUNNER_TEMP/cert.p12 -k $kc -P "$CERT_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k ci $kc
+            security list-keychains -d user -s $kc login.keychain
+            sign() { codesign --force --timestamp --options runtime -s "$SIGN_ID" "$@"; }
+            # Inside out: Qt libraries and plugins, Sparkle's helpers (its documented order), then the app.
+            find $app/Contents -type f \( -name '*.dylib' -o -perm +111 \) ! -path '*/MacOS/SceneVisualiser' \
+              ! -path '*Sparkle.framework*' -print0 | xargs -0 -n1 codesign --force --timestamp --options runtime -s "$SIGN_ID"
+            for f in $app/Contents/Frameworks/Qt*.framework; do sign "$f"; done
+            sp=$app/Contents/Frameworks/Sparkle.framework/Versions/B
+            if [ -d "$sp" ]; then
+              sign $sp/XPCServices/Installer.xpc
+              sign --preserve-metadata=entitlements $sp/XPCServices/Downloader.xpc
+              sign $sp/Autoupdate $sp/Updater.app
+              sign $app/Contents/Frameworks/Sparkle.framework
+            fi
+            sign --entitlements installer/macos/entitlements.plist $app
+          fi
+          hdiutil create -volname "Scene Visualiser" -srcfolder $app -ov -format UDZO SceneVisualiser-macos.dmg
+          if [ -n "$CERT_P12" ] && [ -n "$NOTARY_KEY" ]; then
+            codesign --force --timestamp -s "$SIGN_ID" SceneVisualiser-macos.dmg
+            echo "$NOTARY_KEY" | base64 --decode > $RUNNER_TEMP/notary.p8
+            xcrun notarytool submit SceneVisualiser-macos.dmg --key $RUNNER_TEMP/notary.p8 --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER" --wait
+            xcrun stapler staple SceneVisualiser-macos.dmg
+          fi
       - uses: actions/upload-artifact@v4
         if: runner.os != 'Linux'
         with:
           name: SceneVisualiser-${{ runner.os }}
           path: SceneVisualiser-*.*
           if-no-files-found: error
+
+  # B7: a v* tag publishes the installers as a GitHub release and signs them into the appcast on GitHub Pages.
+  # vX.Y.Z-test tags feed appcast-test.xml (the Test channel), the rest appcast.xml.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: SceneVisualiser-*
+          merge-multiple: true
+          path: out
+      - name: Release and appcast
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          tag=${GITHUB_REF_NAME}
+          version=${tag#v}
+          feed=appcast.xml; prerelease=
+          case $tag in *-test*) feed=appcast-test.xml; prerelease=--prerelease;; esac
+          gh release create $tag out/* --title "Scene Visualiser $version" --generate-notes $prerelease
+          [ -n "$SPARKLE_ED_PRIVATE_KEY" ] || { echo "No SPARKLE_ED_PRIVATE_KEY: appcast not published"; exit 0; }
+          pip install cryptography
+          base=https://github.com/${{ github.repository }}/releases/download/$tag
+          python3 tools/make_appcast.py build --version $version --url-base $base \
+            --notes https://github.com/${{ github.repository }}/releases/tag/$tag \
+            out/SceneVisualiser-windows.msi out/SceneVisualiser-macos.dmg > $RUNNER_TEMP/$feed
+          git fetch origin gh-pages && git switch gh-pages || git switch --orphan gh-pages
+          cp $RUNNER_TEMP/$feed . && git add $feed
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -m "appcast: $tag" && git push origin gh-pages

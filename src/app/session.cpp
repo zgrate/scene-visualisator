@@ -1,5 +1,8 @@
 #include "session.h"
 
+#include "crash_reports.h"
+#include "updater.h"
+
 #include "core/fbx.h"
 #include "core/interchange.h"
 #include "core/mvr.h"
@@ -17,6 +20,7 @@
 #include <QPdfWriter>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QSvgGenerator>
 #include <algorithm>
@@ -1310,4 +1314,27 @@ QString Session::exportDrawing(const QString &kind, const QUrl &url) {
 QVariantList Session::list_of(const char *key) const {
     const json &p = document_.data();
     return p.contains(key) && p[key].is_array() ? to_variant(p[key]).toList() : QVariantList();
+}
+
+QVariant Session::preference(const QString &key, const QVariant &fallback) {
+    if (key == "autoUpdate")
+        return sv::updater::automatic();
+    return QSettings("SceneVisualiser", "Scene Visualiser").value(key, fallback);
+}
+
+void Session::setPreference(const QString &key, const QVariant &value) {
+    if (key == "autoUpdate")
+        return sv::updater::set_automatic(value.toBool());
+    QSettings("SceneVisualiser", "Scene Visualiser").setValue(key, value);
+    if (key == "crashReports")
+        sv::crash::set_consent(value.toBool());
+}
+
+void Session::checkForUpdates() { sv::updater::check_now(); }
+
+QVariantMap Session::app_info() {
+    return {{"version", QCoreApplication::applicationVersion()},
+            {"updates", sv::updater::supported()},
+            {"crashUploads", sv::crash::uploads_supported()},
+            {"crashFolder", QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/crashes"}};
 }

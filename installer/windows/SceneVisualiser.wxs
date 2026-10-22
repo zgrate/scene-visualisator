@@ -1,0 +1,45 @@
+<!-- B7 per-machine MSI (WiX v5). Build from the windeployqt folder:
+     wix build installer/windows/SceneVisualiser.wxs -ext WixToolset.Firewall.wixext
+       -arch x64 -d Version=0.3.0 -d Dist=dist/SceneVisualiser -o SceneVisualiser.msi -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
+  <Package Name="Scene Visualiser" Manufacturer="Scene Visualiser" Version="$(Version)" Scope="perMachine"
+           UpgradeCode="6B0E5C0B-5D0A-4E27-9B8E-3B1C2F6A9D41" Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer Scene Visualiser is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <!-- No dialog sequence: a plain progress UI, Program Files location. -->
+    <Icon Id="AppIcon" SourceFile="$(Dist)/SceneVisualiser.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Scene Visualiser">
+        <Component Id="App">
+          <File Id="AppExe" Source="$(Dist)/SceneVisualiser.exe" KeyPath="yes" />
+          <!-- DMX and NDI arrive unsolicited; allow this program on private networks only. This covers Art-Net
+               (UDP 6454), sACN (UDP 5568) and NDI's discovery and stream ports without opening them to others. -->
+          <fw:FirewallException Id="AppPrivate" Name="Scene Visualiser" Program="[#AppExe]" Profile="private"
+                                Scope="any" IgnoreFailure="yes" />
+          <!-- .svproj association -->
+          <ProgId Id="SceneVisualiser.Project" Description="Scene Visualiser project" Icon="AppIcon">
+            <Extension Id="svproj" ContentType="application/x-scene-visualiser-project">
+              <Verb Id="open" Command="Open" TargetFile="AppExe" Argument="&quot;%1&quot;" />
+            </Extension>
+          </ProgId>
+        </Component>
+        <!-- Everything else windeployqt put next to the exe (Qt DLLs, QML, plugins, licences). -->
+        <Files Include="$(Dist)/**">
+          <Exclude Files="$(Dist)/SceneVisualiser.exe" />
+        </Files>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenu">
+        <Shortcut Id="StartMenuShortcut" Name="Scene Visualiser" Target="[INSTALLFOLDER]SceneVisualiser.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM" Key="Software\Scene Visualiser" Name="StartMenu" Type="integer" Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>

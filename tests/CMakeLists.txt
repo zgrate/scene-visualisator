@@ -17,7 +17,8 @@ endif()
 set_property(TEST render_golden PROPERTY SKIP_RETURN_CODE 77)
 
 # Session (the QML-facing edit API) built straight from the app sources, under an offscreen QGuiApplication.
-add_executable(sv_session_tests session_tests.cpp ${PROJECT_SOURCE_DIR}/src/app/session.cpp ${PROJECT_SOURCE_DIR}/src/app/session.h)
+add_executable(sv_session_tests session_tests.cpp ${PROJECT_SOURCE_DIR}/src/app/session.cpp ${PROJECT_SOURCE_DIR}/src/app/session.h
+    ${PROJECT_SOURCE_DIR}/src/app/updater.cpp ${PROJECT_SOURCE_DIR}/src/app/crash_reports.cpp)
 set_target_properties(sv_session_tests PROPERTIES AUTOMOC ON)
 target_include_directories(sv_session_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/app)
 file(GLOB sv_test_gdtf CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/resources/gdtf/*.gdtf)
@@ -25,3 +26,10 @@ qt_add_resources(sv_session_tests "test_gdtf" PREFIX "/gdtf" BASE ${PROJECT_SOUR
 target_link_libraries(sv_session_tests PRIVATE Catch2::Catch2 sv_render sv_proto sv_media Qt6::Qml Qt6::Svg)
 catch_discover_tests(sv_session_tests)
 target_compile_definitions(sv_session_tests PRIVATE SV_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
+# B7: the appcast signer used by release CI.
+find_program(SV_PYTHON3 python3) # the one on PATH, as the tools are documented; find_package may pick another
+if(SV_PYTHON3)
+    add_test(NAME appcast_tool COMMAND ${SV_PYTHON3} -I ${PROJECT_SOURCE_DIR}/tools/make_appcast.py --self-test)
+    set_tests_properties(appcast_tool PROPERTIES SKIP_RETURN_CODE 77)
+endif()
