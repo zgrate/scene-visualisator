@@ -3,8 +3,8 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 
-// Project screen: new, open, save, save as, imports (GDTF, OBJ, Resolume) and exports (patch CSV, grandMA3 patch,
-// Resolume Advanced Output, OBJ). Errors show inline under the buttons.
+// Project screen: new, open, save, save as, imports (GDTF, OBJ, Resolume, MVR, patch CSV) and exports (patch CSV,
+// grandMA3 patch, Resolume Advanced Output, OBJ, MVR). Errors show inline under the buttons.
 Rectangle {
     id: screen
     color: Theme.bg
@@ -52,6 +52,93 @@ Rectangle {
                           : qsTr("Screens imported"))
         }
     }
+    FileDialog {
+        id: mvrDialog
+        nameFilters: [qsTr("My Virtual Rig (*.mvr)")]
+        onAccepted: {
+            const error = Session.importMvr(selectedFile)
+            screen.report(error, Session.resolumeWarnings.length
+                          ? qsTr("MVR imported · %1 warnings: %2").arg(Session.resolumeWarnings.length)
+                                                                     .arg(Session.resolumeWarnings.join("; "))
+                          : qsTr("MVR imported"))
+        }
+    }
+    FileDialog {
+        id: csvDialog
+        nameFilters: [qsTr("Patch lists (*.csv *.txt)")]
+        onAccepted: {
+            const p = Session.csvPreview(selectedFile)
+            if (p.error) { screen.report(p.error, ""); return }
+            csvMap.url = selectedFile
+            csvMap.preview = p
+            csvMap.mapping = Object.assign({}, p.mapping)
+            csvMap.open()
+        }
+    }
+    // FR-23: one ComboBox per field over the file's columns, guessed from the header.
+    Dialog {
+        id: csvMap
+        property url url
+        property var preview: ({ header: [], rows: [], fields: [], mapping: {}, count: 0 })
+        property var mapping: ({})
+        readonly property var labels: ({ fixtureId: qsTr("Fixture ID"), name: qsTr("Name"), type: qsTr("Type"),
+                                         mode: qsTr("Mode"), universe: qsTr("Universe"), address: qsTr("Address"),
+                                         patch: qsTr("Patch u.a"), x: "X", y: "Y", z: "Z", rotX: qsTr("Rot X"),
+                                         rotY: qsTr("Rot Y"), rotZ: qsTr("Rot Z") })
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Import patch CSV · %1 rows").arg(preview.count)
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        ColumnLayout {
+            spacing: 8
+            GridLayout {
+                columns: 4
+                columnSpacing: 8
+                rowSpacing: 4
+                Repeater {
+                    model: csvMap.preview.fields
+                    RowLayout {
+                        id: fieldRow
+                        required property string modelData
+                        spacing: 6
+                        Label {
+                            text: csvMap.labels[fieldRow.modelData] || fieldRow.modelData
+                            color: Theme.muted
+                            font.pixelSize: Theme.small + 1
+                            Layout.preferredWidth: 64
+                        }
+                        ComboBox {
+                            implicitWidth: 130
+                            font.pixelSize: Theme.small + 1
+                            model: ["—"].concat(csvMap.preview.header)
+                            currentIndex: (csvMap.mapping[fieldRow.modelData] ?? -1) + 1
+                            onActivated: i => {
+                                const m = Object.assign({}, csvMap.mapping)
+                                m[fieldRow.modelData] = i - 1
+                                csvMap.mapping = m
+                            }
+                        }
+                    }
+                }
+            }
+            RowLayout {
+                spacing: 6
+                Label { text: qsTr("Positions in"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
+                ComboBox { id: csvUnit; implicitWidth: 64; model: ["m", "cm", "mm", "in", "ft"] }
+                Check { id: csvZUp; text: qsTr("Z up (Vectorworks)") }
+            }
+            Label {
+                text: [csvMap.preview.header.join(" | ")].concat(csvMap.preview.rows.map(r => r.join(" | "))).join("\n")
+                color: Theme.fg
+                font.family: Theme.mono
+                font.pixelSize: Theme.small
+                elide: Text.ElideRight
+                Layout.maximumWidth: 640
+            }
+        }
+        onAccepted: screen.report(Session.importCsv(url, mapping, csvUnit.currentText, csvZUp.checked),
+                                  qsTr("Patch imported"))
+    }
     // One save dialog for every export; kind picks the format, suffix and filter.
     FileDialog {
         id: exportDialog
@@ -61,7 +148,8 @@ Rectangle {
             ma3: ["xml", qsTr("grandMA3 patch (*.xml)")],
             resolume: ["xml", qsTr("Resolume Advanced Output (*.xml)")],
             obj: ["obj", qsTr("Wavefront OBJ (*.obj)")],
-            objSelection: ["obj", qsTr("Wavefront OBJ (*.obj)")]
+            objSelection: ["obj", qsTr("Wavefront OBJ (*.obj)")],
+            mvr: ["mvr", qsTr("My Virtual Rig (*.mvr)")]
         })
         fileMode: FileDialog.SaveFile
         defaultSuffix: kind ? formats[kind][0] : ""
@@ -149,6 +237,16 @@ Rectangle {
                 Check { id: zUp; text: qsTr("Z up") }
                 Check { id: split; text: qsTr("Split groups") }
             }
+            RowLayout {
+                spacing: 6
+                Button { text: qsTr("MVR scene…"); onClicked: mvrDialog.open() }
+                Button {
+                    text: qsTr("Patch CSV…")
+                    onClicked: csvDialog.open()
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Our patch CSV, Capture or Vectorworks lists; matching fixture IDs are updated")
+                }
+            }
             Section { text: qsTr("EXPORT") }
             Flow {
                 Layout.fillWidth: true
@@ -166,6 +264,7 @@ Rectangle {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Writes an Advanced Output preset; pick it once in Arena's Advanced Output")
                 }
+                Button { text: qsTr("MVR scene…"); onClicked: screen.exportAs("mvr") }
                 Button { text: qsTr("OBJ scene…"); onClicked: screen.exportAs("obj") }
                 Button {
                     text: qsTr("OBJ selection…")

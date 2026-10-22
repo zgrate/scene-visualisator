@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <climits>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <optional>
 #include <pugixml.hpp>
@@ -192,6 +194,174 @@ double unit_scale(std::string_view unit) {
         {"m", 1.0}, {"cm", 0.01}, {"mm", 0.001}, {"in", 0.0254}, {"ft", 0.3048}};
     const auto it = scale.find(unit);
     return it == scale.end() ? 1.0 : it->second;
+}
+
+std::vector<std::vector<std::string>> parse_csv(std::string_view text) {
+    if (text.starts_with("\xEF\xBB\xBF"))
+        text.remove_prefix(3);
+    const std::string_view head = text.substr(0, text.find('\n'));
+    char sep = ',';
+    for (char c : {';', '\t'})
+        if (std::count(head.begin(), head.end(), c) > std::count(head.begin(), head.end(), sep))
+            sep = c;
+    std::vector<std::vector<std::string>> rows(1);
+    std::string cell;
+    bool quoted = false, any = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (quoted) {
+            if (c == '"' && i + 1 < text.size() && text[i + 1] == '"')
+                cell += text[++i];
+            else if (c == '"')
+                quoted = false;
+            else
+                cell += c;
+        } else if (c == '"') {
+            quoted = any = true;
+        } else if (c == sep) {
+            rows.back().push_back(std::move(cell));
+            cell.clear();
+            any = true;
+        } else if (c == '\n' || c == '\r') {
+            if (c == '\r' && i + 1 < text.size() && text[i + 1] == '\n')
+                ++i;
+            if (any || !cell.empty())
+                rows.back().push_back(std::move(cell));
+            cell.clear();
+            any = false;
+            if (!rows.back().empty())
+                rows.emplace_back();
+        } else {
+            cell += c;
+            any = true;
+        }
+    }
+    if (any || !cell.empty())
+        rows.back().push_back(std::move(cell));
+    if (rows.back().empty())
+        rows.pop_back();
+    return rows;
+}
+
+CsvMapping guess_csv_mapping(const std::vector<std::string> &header) {
+    static const std::map<std::string, std::vector<std::string>> synonyms{
+        {"fixtureId", {"fixtureid", "fid", "id", "channel", "unitnumber", "fixturenumber"}},
+        {"name", {"name", "label", "fixturename"}},
+        {"type", {"fixturetype", "type", "gdtf", "gdtfspec", "model", "fixturemodel", "instrumenttype"}},
+        {"mode", {"mode", "dmxmode", "gdtfmode", "personality"}},
+        {"universe", {"universe", "univ", "dmxuniverse"}},
+        {"address", {"address", "dmxaddress", "addr", "startaddress", "absoluteaddress"}},
+        {"patch", {"patch", "dmxpatch", "universeaddress"}},
+        {"x", {"x", "posx", "positionx", "xlocation", "xpos"}},
+        {"y", {"y", "posy", "positiony", "ylocation", "ypos"}},
+        {"z", {"z", "posz", "positionz", "zlocation", "zpos"}},
+        {"rotX", {"rotx", "rotationx", "xrotation"}},
+        {"rotY", {"roty", "rotationy", "yrotation"}},
+        {"rotZ", {"rotz", "rotationz", "zrotation"}}};
+    std::vector<std::string> keys;
+    for (const std::string &h : header) {
+        std::string k;
+        for (char c : h)
+            if (std::isalnum(static_cast<unsigned char>(c)))
+                k += char(std::tolower(static_cast<unsigned char>(c)));
+        keys.push_back(std::move(k));
+    }
+    CsvMapping m;
+    for (const auto &[field, names] : synonyms) // earlier synonyms win, so "FixtureType" beats a later "Type"
+        for (const std::string &n : names)
+            if (const auto it = std::find(keys.begin(), keys.end(), n); it != keys.end() && !m.contains(field)) {
+                m[field] = int(it - keys.begin());
+                break;
+            }
+    return m;
+}
+
+json csv_import(const json &project, const std::vector<std::vector<std::string>> &rows, const CsvMapping &mapping,
+                const CsvImportOptions &options) {
+    const auto cell = [&](const std::vector<std::string> &row, const char *field) -> std::optional<std::string> {
+        const auto it = mapping.find(field);
+        if (it == mapping.end() || it->second < 0 || std::size_t(it->second) >= row.size())
+            return std::nullopt;
+        std::string v = row[std::size_t(it->second)];
+        v.erase(0, v.find_first_not_of(" \t"));
+        v.erase(v.find_last_not_of(" \t") + 1);
+        return v.empty() ? std::nullopt : std::optional(v);
+    };
+    const auto number = [](const std::optional<std::string> &s) -> std::optional<double> {
+        if (!s)
+            return std::nullopt;
+        std::string t = *s;
+        std::replace(t.begin(), t.end(), ',', '.'); // decimal comma from a ';' file
+        char *end = nullptr;
+        const double v = std::strtod(t.c_str(), &end);
+        return end != t.c_str() && std::isfinite(v) ? std::optional(v) : std::nullopt;
+    };
+    std::map<int, int> by_id; // fixtureId -> object index
+    const json &objects = project.at("objects");
+    for (std::size_t i = 0; i < objects.size(); ++i)
+        if (objects[i].value("type", "") == "fixture" && objects[i].contains("fixtureId") &&
+            objects[i]["fixtureId"].is_number_integer())
+            by_id[objects[i]["fixtureId"].get<int>()] = int(i);
+
+    json patch = json::array();
+    for (std::size_t r = 1; r < rows.size(); ++r) {
+        const auto &row = rows[r];
+        const auto id = number(cell(row, "fixtureId"));
+        const auto name = cell(row, "name"), type = cell(row, "type"), mode = cell(row, "mode");
+        if (!id && !name && !type)
+            continue;
+        json fields = json::object();
+        if (id)
+            fields["fixtureId"] = int(std::lround(*id));
+        if (name)
+            fields["name"] = *name;
+        if (type || mode) {
+            auto [gdtf, m] = options.resolve ? options.resolve(type.value_or(""), mode.value_or(""))
+                                             : std::pair{type.value_or(""), mode.value_or("")};
+            if (type)
+                fields["gdtf"] = gdtf.empty() ? *type : gdtf;
+            if (!m.empty())
+                fields["mode"] = m;
+        }
+        // Patch: "u.a", or Universe + Address, or an absolute address alone.
+        std::optional<double> u = number(cell(row, "universe")), a = number(cell(row, "address"));
+        if (const auto p = cell(row, "patch"); p && p->find('.') != std::string::npos) {
+            u = number(p->substr(0, p->find('.')));
+            a = number(p->substr(p->find('.') + 1));
+        }
+        if (a && *a >= 1) {
+            int uu = u ? int(*u) : 1, aa = int(*a);
+            uu += (aa - 1) / 512;
+            aa = (aa - 1) % 512 + 1;
+            if (uu >= 1)
+                fields["patch"] = {{"universe", uu}, {"address", aa}};
+        }
+        const auto vec = [&](const char *a0, const char *a1, const char *a2, double scale) -> std::optional<json> {
+            const auto x = number(cell(row, a0)), y = number(cell(row, a1)), z = number(cell(row, a2));
+            if (!x && !y && !z)
+                return std::nullopt;
+            const double v[3] = {x.value_or(0) * scale, y.value_or(0) * scale, z.value_or(0) * scale};
+            // shortcut: Z-up rotations map axis by axis like positions, exact only for single-axis rotations.
+            return options.z_up ? json{v[0], v[2], -v[1]} : json{v[0], v[1], v[2]};
+        };
+        if (const auto pos = vec("x", "y", "z", options.scale))
+            fields["position"] = *pos;
+        if (const auto rot = vec("rotX", "rotY", "rotZ", 1))
+            fields["rotation"] = *rot;
+
+        if (const auto it = id ? by_id.find(int(std::lround(*id))) : by_id.end(); it != by_id.end()) {
+            const json &o = objects[std::size_t(it->second)];
+            for (const auto &[k, v] : fields.items())
+                patch.push_back({{"op", o.contains(k) ? "replace" : "add"},
+                                 {"path", "/objects/" + std::to_string(it->second) + "/" + k},
+                                 {"value", v}});
+        } else {
+            json o = new_fixture(name.value_or(type.value_or("Fixture")), "", "");
+            o.update(fields);
+            patch.push_back({{"op", "add"}, {"path", "/objects/-"}, {"value", std::move(o)}});
+        }
+    }
+    return patch;
 }
 
 } // namespace sv

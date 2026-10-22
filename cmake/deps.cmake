@@ -25,6 +25,15 @@ FetchContent_Declare(pugixml
 set(PUGIXML_NO_EXCEPTIONS ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(pugixml)
 
+# glTF/GLB geometry inside MVR files (B5). Header only; the implementation is compiled in core/mvr.cpp.
+FetchContent_Declare(cgltf
+    URL https://github.com/jkuhlmann/cgltf/archive/refs/tags/v1.15.tar.gz
+    URL_HASH SHA256=84e352092e5cd6aab7f66de62ddb66beb5e6f18d412ca9d12950d7a55bfef25a
+    SYSTEM)
+FetchContent_MakeAvailable(cgltf)
+add_library(cgltf INTERFACE)
+target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
+
 # Standalone Asio (header-only) for the network thread. sACN uses our own E1.31 receiver on it, not the ETCLabs
 # library (the spec's named fallback): one socket model, no EtcPal threads.
 FetchContent_Declare(asio

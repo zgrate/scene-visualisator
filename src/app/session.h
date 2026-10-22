@@ -151,6 +151,11 @@ class Session : public QObject {
     // kind still or video: copies the file into media/ (linked by absolute path above 200 MB) and selects it.
     Q_INVOKABLE QString setMediaFile(const QString &kind, const QUrl &url);
     Q_INVOKABLE QString importObj(const QUrl &url, const QString &unit, bool zUp, bool split);
+    // FR-22: merges an MVR scene in one undo step; objects whose UUID already exists get a new one.
+    Q_INVOKABLE QString importMvr(const QUrl &url);
+    // FR-23: {header, rows (first 8), mapping {field: column}, fields, error} for the CSV mapping dialog.
+    Q_INVOKABLE QVariantMap csvPreview(const QUrl &url) const;
+    Q_INVOKABLE QString importCsv(const QUrl &url, const QVariantMap &mapping, const QString &unit, bool zUp);
     Q_INVOKABLE QString recover();      // opens the autosave in place of the saved file, unsaved
     Q_INVOKABLE void discardRecovery(); // deletes the autosave
 

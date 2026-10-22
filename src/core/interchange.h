@@ -3,6 +3,9 @@
 // OBJ geometry. Pure functions over the project JSON; edits come back as JSON patches for Document::apply.
 #include "core/model.h"
 
+#include <array>
+#include <functional>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -26,6 +29,26 @@ struct ObjGroup {
 // Polygons are fanned into triangles; vt/vn and materials are ignored.
 // shortcut: no MTL materials (set pieces render grey), switch to tinyobjloader when materials are needed.
 std::vector<ObjGroup> parse_obj(std::string_view text); // throws InterchangeError on bad indices or no faces
+
+// CSV patch import (FR-23): our own patch CSV, Capture and Vectorworks exports. Separator is ',', ';' or tab,
+// whichever the header line has most of; quotes as RFC 4180.
+std::vector<std::vector<std::string>> parse_csv(std::string_view text);
+// Our fields: fixtureId, name, type, mode, universe, address, patch ("u.a"), x, y, z, rotX, rotY, rotZ.
+inline constexpr std::array<const char *, 13> csv_fields{
+    "fixtureId", "name", "type", "mode", "universe", "address", "patch", "x", "y", "z", "rotX", "rotY", "rotZ"};
+using CsvMapping = std::map<std::string, int>; // field -> column, -1 or absent when unmapped
+// shortcut: header synonyms stand in for Capture/Vectorworks presets, add real presets when users send samples.
+CsvMapping guess_csv_mapping(const std::vector<std::string> &header);
+struct CsvImportOptions {
+    double scale = 1;  // unit_scale of the file's unit
+    bool z_up = false; // file is Z-up (Vectorworks): ours = (x, z, -y)
+    // Type and mode text -> {gdtf file, mode}; empty gdtf keeps the text, so the fixture shows as unknown.
+    std::function<std::pair<std::string, std::string>(const std::string &, const std::string &)> resolve;
+};
+// Rows after the header become one patch: a row whose fixtureId matches a fixture updates the mapped fields, the
+// rest add fixtures. Rows without a name, type or fixture ID are skipped.
+json csv_import(const json &project, const std::vector<std::vector<std::string>> &rows, const CsvMapping &mapping,
+                const CsvImportOptions &options);
 
 // Scale for an OBJ unit name: "m", "cm", "mm", "in", "ft".
 double unit_scale(std::string_view unit);

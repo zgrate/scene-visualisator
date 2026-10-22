@@ -38,7 +38,7 @@ python3 tools/dmx_send.py --proto sacn --universes 1-4 --pattern chase   # test 
 ## 3. Layout & boundaries
 | Target | Path | May use |
 |---|---|---|
-| `sv_core` | `src/core` | std, nlohmann_json, miniz. **No Qt.** Model, `.svproj`, undo, exporters, OBJ |
+| `sv_core` | `src/core` | std, nlohmann_json, miniz, pugixml, cgltf. **No Qt.** Model, `.svproj`, undo, exporters, OBJ, MVR |
 | `sv_gdtf` | `src/gdtf` | std, pugixml, miniz. **No Qt.** GDTF reader, DMX→attribute decoder |
 | `sv_proto` | `src/protocol` | std, Asio (private). **No Qt.** Art-Net/sACN receivers, merger, triple buffer, generators |
 | `sv_render` | `src/render` | Qt Gui + QRhi only (no Quick/QML). Scene, beam and wall passes, shaders via `qt_add_shaders` |
@@ -281,3 +281,20 @@ Hard rules:
   by absolute path. `mediaSources(kind)` lists screens or windows. `mediaStatus` is `{kind, width, height, fps, signal,
   live, error}`, refreshed with `dmxChanged()`. The dock's MEDIA button opens `MediaCard.qml`.
 - **Screenshots:** `--screenshot` waits up to 5 s for a live source's first frame.
+
+## 18. MVR and CSV (B4)
+- **`core/mvr.h`:** `mvr_import(zip)` returns layers, objects, package files and warnings; `mvr_export(project,
+  files)` writes MVR 1.6. Objects keep their MVR UUIDs, and unread child elements stay verbatim in `extras.mvr.xml`, so
+  import, export and import loses nothing (AT-1). `<AUXData>` round-trips through `project["mvr"]["auxData"]`.
+- **Mapping:** Fixture becomes `fixture`, VideoScreen `ledWall`, a straight-bar Truss `truss`, GroupObject `group`, and
+  anything else a `setPiece` on its `geometry/` file. Pixel strips and cameras are not exported.
+- **Axes:** `transform_from_mvr` and `mvr_from_transform` convert between MVR (mm, Z up, Y upstage) and ours. Of the two
+  Euler triples, the one with smaller angles is kept, so a hung fixture reads (180, 0, 0).
+- **Geometry:** `parse_gltf` (cgltf) loads `.glb`/`.gltf` like OBJ. `Session::rebuild_meshes` reads both, and the
+  exporter writes generated `.glb` files for walls, trusses and OBJ set pieces.
+- **Session:** `importMvr(url)` merges into the open project in one undo step and renames colliding UUIDs (re-importing
+  keeps existing layers). Warnings go to `resolumeWarnings`. `exportFile("mvr", url)` writes the zip.
+- **CSV:** `parse_csv` detects `,`, `;` or tab. `guess_csv_mapping` matches header synonyms; there are no real
+  Capture/Vectorworks presets yet. `csv_import` updates fixtures whose `fixtureId` matches and adds the rest. Session
+  `csvPreview(url)` feeds the mapping dialog, and `importCsv(url, mapping, unit, zUp)` resolves type text against the
+  library (file name, `Manufacturer@Name` or type name).

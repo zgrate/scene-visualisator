@@ -5,17 +5,20 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace sv {
 
+using ZipEntries = std::map<std::string, std::vector<std::uint8_t>>;
+
 struct Package {
     json project = new_project();
     // Every other entry, by path inside the zip (e.g. "gdtf/Generic@Spot@1.gdtf").
     // shortcut: assets are held in memory, stream media files from disk once video sources land (Beta).
-    std::map<std::string, std::vector<std::uint8_t>> files;
+    ZipEntries files;
 };
 
 struct ProjectFileError : std::runtime_error {
@@ -23,6 +26,10 @@ struct ProjectFileError : std::runtime_error {
 };
 
 inline constexpr int backup_count = 3;
+
+// Plain zip helpers, shared with MVR (a zip too). read_zip throws ProjectFileError for corrupt or oversized entries.
+ZipEntries read_zip(std::span<const std::uint8_t> bytes);
+std::vector<std::uint8_t> write_zip(const ZipEntries &entries);
 
 // Throws ProjectFileError for unreadable, corrupt, or newer-schema packages.
 Package load_package(const std::filesystem::path &path);

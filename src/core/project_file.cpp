@@ -19,28 +19,10 @@ std::vector<std::uint8_t> read_file(const fs::path &path) {
 }
 
 std::vector<std::uint8_t> to_zip(const Package &pkg) {
-    mz_zip_archive zip{};
-    if (!mz_zip_writer_init_heap(&zip, 0, 0))
-        throw ProjectFileError("zip writer init failed");
-    bool ok = true;
-    const auto add = [&](const std::string &name, const void *data, std::size_t size) {
-        ok = ok && mz_zip_writer_add_mem(&zip, name.c_str(), data, size, MZ_DEFAULT_COMPRESSION);
-    };
+    ZipEntries entries = pkg.files;
     const std::string doc = pkg.project.dump(2) + "\n";
-    add("project.json", doc.data(), doc.size());
-    for (const auto &[name, bytes] : pkg.files)
-        add(name, bytes.data(), bytes.size());
-    void *buf = nullptr;
-    std::size_t size = 0;
-    ok = ok && mz_zip_writer_finalize_heap_archive(&zip, &buf, &size);
-    std::vector<std::uint8_t> out;
-    if (ok)
-        out.assign(static_cast<std::uint8_t *>(buf), static_cast<std::uint8_t *>(buf) + size);
-    mz_free(buf);
-    mz_zip_writer_end(&zip);
-    if (!ok)
-        throw ProjectFileError("zip write failed");
-    return out;
+    entries["project.json"].assign(doc.begin(), doc.end());
+    return write_zip(entries);
 }
 
 void write_atomic(const fs::path &path, const std::vector<std::uint8_t> &bytes, bool keep_backups) {
@@ -67,14 +49,11 @@ void write_atomic(const fs::path &path, const std::vector<std::uint8_t> &bytes, 
 
 } // namespace
 
-Package load_package(const fs::path &path) {
-    const std::vector<std::uint8_t> bytes = read_file(path);
+ZipEntries read_zip(std::span<const std::uint8_t> bytes) {
     mz_zip_archive zip{};
     if (!mz_zip_reader_init_mem(&zip, bytes.data(), bytes.size(), 0))
-        throw ProjectFileError(path.string() + " is not a valid .svproj package");
-
-    Package pkg;
-    bool have_doc = false;
+        throw ProjectFileError("not a zip file");
+    ZipEntries out;
     std::string error;
     for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&zip) && error.empty(); ++i) {
         mz_zip_archive_file_stat st;
@@ -95,17 +74,51 @@ Package load_package(const fs::path &path) {
             break;
         }
         const auto *p = static_cast<const std::uint8_t *>(data);
-        if (std::string(st.m_filename) == "project.json") {
-            pkg.project = json::parse(p, p + size, nullptr, false);
-            have_doc = !pkg.project.is_discarded();
-            if (!have_doc)
-                error = "project.json is not valid JSON";
-        } else {
-            pkg.files[st.m_filename].assign(p, p + size);
-        }
+        out[st.m_filename].assign(p, p + size);
         mz_free(data);
     }
     mz_zip_reader_end(&zip);
+    if (!error.empty())
+        throw ProjectFileError(error);
+    return out;
+}
+
+std::vector<std::uint8_t> write_zip(const ZipEntries &entries) {
+    mz_zip_archive zip{};
+    if (!mz_zip_writer_init_heap(&zip, 0, 0))
+        throw ProjectFileError("zip writer init failed");
+    bool ok = true;
+    for (const auto &[name, bytes] : entries)
+        ok = ok && mz_zip_writer_add_mem(&zip, name.c_str(), bytes.data(), bytes.size(), MZ_DEFAULT_COMPRESSION);
+    void *buf = nullptr;
+    std::size_t size = 0;
+    ok = ok && mz_zip_writer_finalize_heap_archive(&zip, &buf, &size);
+    std::vector<std::uint8_t> out;
+    if (ok)
+        out.assign(static_cast<std::uint8_t *>(buf), static_cast<std::uint8_t *>(buf) + size);
+    mz_free(buf);
+    mz_zip_writer_end(&zip);
+    if (!ok)
+        throw ProjectFileError("zip write failed");
+    return out;
+}
+
+Package load_package(const fs::path &path) {
+    Package pkg;
+    bool have_doc = false;
+    std::string error;
+    try {
+        pkg.files = read_zip(read_file(path));
+    } catch (const ProjectFileError &e) {
+        throw ProjectFileError(path.string() + " is not a valid .svproj package (" + e.what() + ")");
+    }
+    if (auto it = pkg.files.find("project.json"); it != pkg.files.end()) {
+        pkg.project = json::parse(it->second.begin(), it->second.end(), nullptr, false);
+        have_doc = !pkg.project.is_discarded();
+        if (!have_doc)
+            error = "project.json is not valid JSON";
+        pkg.files.erase(it);
+    }
 
     if (error.empty() && !have_doc)
         error = "project.json missing";

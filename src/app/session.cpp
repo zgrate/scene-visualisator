@@ -1,6 +1,7 @@
 #include "session.h"
 
 #include "core/interchange.h"
+#include "core/mvr.h"
 #include "core/resolume.h"
 #include "render/test_pattern.h"
 
@@ -694,7 +695,10 @@ QString Session::readdressSelection(const QString &start) {
 QString Session::exportFile(const QString &kind, const QUrl &url) {
     std::string text;
     try {
-        if (kind == "csv")
+        if (kind == "mvr") {
+            const std::vector<std::uint8_t> zip = sv::mvr_export(document_.data(), package().files);
+            text.assign(zip.begin(), zip.end());
+        } else if (kind == "csv")
             text = sv::patch_csv(document_.data());
         else if (kind == "ma3")
             text = sv::ma3_patch_xml(document_.data());
@@ -923,14 +927,153 @@ QString Session::importObj(const QUrl &url, const QString &unit, bool zUp, bool 
     return {};
 }
 
+QString Session::importMvr(const QUrl &url) {
+    QString error;
+    const QByteArray bytes = read_file(url, error);
+    if (!error.isEmpty())
+        return error;
+    sv::MvrScene scene;
+    try {
+        scene = sv::mvr_import({reinterpret_cast<const std::uint8_t *>(bytes.constData()), std::size_t(bytes.size())});
+    } catch (const std::exception &e) {
+        return QString::fromUtf8(e.what());
+    }
+    resolume_warnings_.clear(); // shown on the Project screen as the last import's warnings
+    for (const std::string &w : scene.warnings) {
+        qCInfo(lcSession) << "MVR import:" << w.c_str();
+        resolume_warnings_.push_back(QString::fromStdString(w));
+    }
+    for (auto &[entry, data] : scene.files)
+        if (entry.starts_with("gdtf/")) {
+            try {
+                add_gdtf(entry.substr(5), std::move(data));
+            } catch (const std::exception &e) {
+                resolume_warnings_.push_back(tr("GDTF %1: %2").arg(QString::fromStdString(entry), e.what()));
+            }
+        } else if (!other_files_.contains(entry)) {
+            other_files_[entry] = std::move(data);
+        }
+    rebuild_meshes();
+
+    // Re-importing the same scene keeps its layers; objects that collide get fresh UUIDs, with parents following.
+    const json &doc = document_.data();
+    std::set<std::string> taken, layers;
+    for (const json &o : doc.at("objects"))
+        taken.insert(o.value("uuid", std::string()));
+    for (const json &l : doc.value("layers", json::array()))
+        layers.insert(l.value("uuid", std::string()));
+    std::map<std::string, std::string> renamed;
+    for (json &o : scene.objects)
+        if (const std::string u = o.value("uuid", std::string()); taken.contains(u))
+            o["uuid"] = renamed[u] = sv::new_uuid();
+    json patch = json::array();
+    if (!doc.contains("layers"))
+        patch.push_back({{"op", "add"}, {"path", "/layers"}, {"value", json::array()}});
+    for (const json &l : scene.layers)
+        if (!layers.contains(l.value("uuid", std::string())))
+            patch.push_back({{"op", "add"}, {"path", "/layers/-"}, {"value", l}});
+    std::set<std::string> added;
+    for (json &o : scene.objects) {
+        if (const auto it = renamed.find(o.value("parent", json()).is_string() ? o["parent"].get<std::string>() : "");
+            it != renamed.end())
+            o["parent"] = it->second;
+        added.insert(o["uuid"].get<std::string>());
+        patch.push_back({{"op", "add"}, {"path", "/objects/-"}, {"value", std::move(o)}});
+    }
+    if (!scene.aux_data.empty())
+        patch.push_back({{"op", doc.contains("mvr") ? "replace" : "add"},
+                         {"path", "/mvr"},
+                         {"value", {{"auxData", scene.aux_data}}}});
+    if (apply(patch, "Import MVR")) {
+        selection_ = added;
+        refresh();
+    }
+    return {};
+}
+
+QVariantMap Session::csvPreview(const QUrl &url) const {
+    QString error;
+    const QByteArray bytes = read_file(url, error);
+    if (!error.isEmpty())
+        return {{"error", error}};
+    const auto rows = sv::parse_csv({bytes.constData(), std::size_t(bytes.size())});
+    if (rows.empty())
+        return {{"error", tr("The file is empty")}};
+    QStringList header, fields;
+    for (const std::string &h : rows[0])
+        header.push_back(QString::fromStdString(h));
+    QVariantList preview;
+    for (std::size_t r = 1; r < rows.size() && r <= 8; ++r) {
+        QStringList row;
+        for (const std::string &c : rows[r])
+            row.push_back(QString::fromStdString(c));
+        preview.push_back(row);
+    }
+    QVariantMap mapping;
+    for (const auto &[field, column] : sv::guess_csv_mapping(rows[0]))
+        mapping[QString::fromStdString(field)] = column;
+    for (const char *f : sv::csv_fields)
+        fields.push_back(f);
+    return {{"header", header},
+            {"rows", preview},
+            {"mapping", mapping},
+            {"fields", fields},
+            {"count", int(rows.size()) - 1}};
+}
+
+QString Session::importCsv(const QUrl &url, const QVariantMap &mapping, const QString &unit, bool zUp) {
+    QString error;
+    const QByteArray bytes = read_file(url, error);
+    if (!error.isEmpty())
+        return error;
+    sv::CsvMapping m;
+    for (auto it = mapping.begin(); it != mapping.end(); ++it)
+        m[it.key().toStdString()] = it.value().toInt();
+    sv::CsvImportOptions options;
+    options.scale = sv::unit_scale(unit.toStdString());
+    options.z_up = zUp;
+    // Type text matches a library file name with or without ".gdtf", "Manufacturer@Name", or the type name.
+    options.resolve = [this](const std::string &type, const std::string &mode) -> std::pair<std::string, std::string> {
+        const QString t = QString::fromStdString(type).trimmed();
+        for (const auto &[file, ft] : library_) {
+            const QString f = QString::fromStdString(file);
+            if (f.compare(t, Qt::CaseInsensitive) == 0 || f.compare(t + ".gdtf", Qt::CaseInsensitive) == 0 ||
+                QString::fromStdString(ft.manufacturer + "@" + ft.name).compare(t, Qt::CaseInsensitive) == 0 ||
+                QString::fromStdString(ft.name).compare(t, Qt::CaseInsensitive) == 0 ||
+                QString::fromStdString(ft.short_name).compare(t, Qt::CaseInsensitive) == 0) {
+                for (const auto &md : ft.modes)
+                    if (QString::fromStdString(md.name).compare(QString::fromStdString(mode), Qt::CaseInsensitive) == 0)
+                        return {file, md.name};
+                return {file, ft.modes.empty() ? mode : ft.modes.front().name};
+            }
+        }
+        return {{}, mode};
+    };
+    try {
+        const json patch =
+            sv::csv_import(document_.data(), sv::parse_csv({bytes.constData(), std::size_t(bytes.size())}), m, options);
+        if (patch.empty())
+            return tr("No fixture rows found; check the column mapping");
+        if (!apply(patch, "Import CSV"))
+            return tr("The CSV could not be applied, see the log");
+    } catch (const std::exception &e) {
+        return QString::fromUtf8(e.what());
+    }
+    return {};
+}
+
 void Session::rebuild_meshes() {
     auto lib = std::make_shared<sv::render::MeshLibrary>();
     for (const auto &[entry, bytes] : other_files_) {
-        if (!entry.starts_with("geometry/") || !QString::fromStdString(entry).endsWith(".obj", Qt::CaseInsensitive))
+        const QString name = QString::fromStdString(entry);
+        const bool obj = name.endsWith(".obj", Qt::CaseInsensitive);
+        if (!entry.starts_with("geometry/") ||
+            !(obj || name.endsWith(".glb", Qt::CaseInsensitive) || name.endsWith(".gltf", Qt::CaseInsensitive)))
             continue;
         try {
             std::vector<float> all;
-            for (sv::ObjGroup &g : sv::parse_obj({reinterpret_cast<const char *>(bytes.data()), bytes.size()})) {
+            for (sv::ObjGroup &g : obj ? sv::parse_obj({reinterpret_cast<const char *>(bytes.data()), bytes.size()})
+                                       : sv::parse_gltf(bytes)) {
                 all.insert(all.end(), g.vertices.begin(), g.vertices.end());
                 (*lib)[entry + "#" + g.name] = sv::render::make_mesh(std::move(g.vertices));
             }

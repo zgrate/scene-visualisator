@@ -308,3 +308,57 @@ int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv); // composition text needs fonts
     return Catch::Session().run(argc, argv);
 }
+
+TEST_CASE("Session exports MVR and merges it back in one undo step, renaming colliding UUIDs (FR-22)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const QUrl mvr = QUrl::fromLocalFile(QString::fromStdString((dir / "rig.mvr").string()));
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    REQUIRE(s.exportFile("mvr", mvr).isEmpty());
+    const std::size_t before = s.document().data()["objects"].size();
+
+    Session t(nullptr);
+    t.set_project(sv::new_project());
+    REQUIRE(t.importMvr(mvr).isEmpty());
+    const std::size_t imported = t.document().data()["objects"].size();
+    CHECK(imported >= before - 1); // no pixel strips or cameras in the demo besides what MVR carries
+    CHECK(t.fixture_types().contains("Generic@Spot_7ch.gdtf"));
+    CHECK_FALSE(t.meshes()->empty()); // generated .glb walls and trusses load as meshes
+    // Again into the same project: same count added, all UUIDs unique, one undo removes the lot.
+    REQUIRE(t.importMvr(mvr).isEmpty());
+    std::set<std::string> uuids;
+    for (const json &o : t.document().data()["objects"])
+        uuids.insert(o["uuid"].get<std::string>());
+    CHECK(uuids.size() == 2 * imported);
+    t.undo();
+    CHECK(t.document().data()["objects"].size() == imported);
+    CHECK(t.importMvr(QUrl::fromLocalFile("/nonexistent.mvr")).size() > 0);
+}
+
+TEST_CASE("Session previews a CSV, maps its columns and imports fixtures by type name (FR-23)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const auto csv = dir / "patch.csv";
+    std::ofstream(csv) << "Fixture ID;Label;Model;Mode;Patch;X;Y;Z\n"
+                          "201;Wash A;Wash RGBW;;3.001;100;0;450\n"
+                          "202;Wash B;Generic@Wash_RGBW;;3.011;-100;0;450\n";
+    const QUrl url = QUrl::fromLocalFile(QString::fromStdString(csv.string()));
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    const QVariantMap preview = s.csvPreview(url);
+    CHECK(preview["count"] == 2);
+    QVariantMap mapping = preview["mapping"].toMap();
+    CHECK(mapping["fixtureId"] == 0);
+    CHECK(mapping["patch"] == 4);
+    REQUIRE(s.importCsv(url, mapping, "cm", true).isEmpty());
+    const json &objects = s.document().data()["objects"];
+    REQUIRE(objects.size() == 2);
+    CHECK(objects[1]["gdtf"] == "Generic@Wash_RGBW.gdtf");
+    CHECK(objects[1]["patch"] == json{{"universe", 3}, {"address", 11}});
+    CHECK(objects[0]["position"][1].get<double>() == Catch::Approx(4.5));
+    // Same file again updates by fixture ID instead of adding.
+    REQUIRE(s.importCsv(url, mapping, "cm", true).isEmpty());
+    CHECK(s.document().data()["objects"].size() == 2);
+    CHECK(s.csvPreview(QUrl::fromLocalFile("/nonexistent.csv")).contains("error"));
+}
