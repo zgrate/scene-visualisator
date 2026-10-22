@@ -1,5 +1,8 @@
 #include "render/scene_builder.h"
 
+#include "core/fbx.h"
+#include "render/camera.h"
+
 #include <QColor>
 #include <algorithm>
 #include <cctype>
@@ -225,7 +228,7 @@ struct Builder {
             return;
         }
         const Mesh &mesh = *it->second;
-        scene.meshes.push_back({it->second, m, tinted(piece_colour, sel)});
+        scene.meshes.push_back({it->second, m, tinted(mesh.colour.w() > 0 ? mesh.colour : piece_colour, sel)});
         scene.pick.push_back({box(m, (mesh.lo + mesh.hi) / 2, mesh.hi - mesh.lo), uuid});
     }
 
@@ -371,8 +374,9 @@ std::map<std::string, FixtureState> decode_fixtures(const json &project, const F
     return out;
 }
 
-std::shared_ptr<const Mesh> make_mesh(std::vector<float> vertices) {
+std::shared_ptr<const Mesh> make_mesh(std::vector<float> vertices, QVector4D colour) {
     auto m = std::make_shared<Mesh>();
+    m->colour = colour;
     m->lo = QVector3D(1e30f, 1e30f, 1e30f), m->hi = -m->lo;
     for (std::size_t i = 0; i + 5 < vertices.size(); i += 6) {
         const QVector3D p(vertices[i], vertices[i + 1], vertices[i + 2]);
@@ -425,14 +429,19 @@ std::vector<proto::GeneratorTarget> generator_targets(const json &project, const
     return out;
 }
 
-std::string export_obj(const json &project, const FixtureLibrary &library, const MeshLibrary &meshes,
-                       const std::set<std::string> &only) {
-    const RenderScene scene = build_scene(
+namespace {
+// The scene at rest (no DMX) as world-space triangles per owner (index into objects, -1 for the venue), with the
+// first instance colour, plus each wall's screen.
+struct Gathered {
+    std::map<int, std::vector<QVector3D>> tris;
+    std::map<int, QVector4D> colour;
+    std::map<int, const WallInstance *> walls;
+    RenderScene scene;
+};
+void gather(Gathered &g, const json &project, const FixtureLibrary &library, const MeshLibrary &meshes) {
+    g.scene = build_scene(
         project, decode_fixtures(project, library, [](std::uint16_t) { return std::span<const std::uint8_t>(); }), {},
         0, meshes);
-    const json &objects = project.value("objects", json::array());
-    // Per owner: triangles as world-space positions (normals are left to the importing tool).
-    std::map<int, std::vector<QVector3D>> tris;
     static const auto cube = [] {
         std::vector<QVector3D> v;
         const QVector3D faces[6][3] = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, {{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}},
@@ -443,16 +452,33 @@ std::string export_obj(const json &project, const FixtureLibrary &library, const
                 v.push_back(0.5f * (n + float(a) * u + float(b) * w));
         return v;
     }();
-    for (const BoxInstance &b : scene.boxes)
+    for (const BoxInstance &b : g.scene.boxes) {
+        g.colour.try_emplace(b.owner, b.colour);
         for (const QVector3D &p : cube)
-            tris[b.owner].push_back(b.model.map(p));
-    for (const MeshInstance &m : scene.meshes)
+            g.tris[b.owner].push_back(b.model.map(p));
+    }
+    for (const MeshInstance &m : g.scene.meshes) {
+        g.colour.try_emplace(m.owner, m.colour);
         for (std::size_t i = 0; i + 5 < m.mesh->vertices.size(); i += 6)
-            tris[m.owner].push_back(
+            g.tris[m.owner].push_back(
                 m.model.map(QVector3D(m.mesh->vertices[i], m.mesh->vertices[i + 1], m.mesh->vertices[i + 2])));
-    std::map<int, const WallInstance *> walls;
-    for (const WallInstance &w : scene.walls)
-        walls[w.owner] = &w;
+    }
+    for (const WallInstance &w : g.scene.walls)
+        g.walls[w.owner] = &w;
+}
+
+bool wanted(const json &objects, const std::set<std::string> &only, int owner) {
+    return only.empty() || (owner >= 0 && only.contains(objects[std::size_t(owner)].value("uuid", std::string())));
+}
+} // namespace
+
+std::string export_obj(const json &project, const FixtureLibrary &library, const MeshLibrary &meshes,
+                       const std::set<std::string> &only) {
+    Gathered g;
+    gather(g, project, library, meshes);
+    const json &objects = project.value("objects", json::array());
+    auto &tris = g.tris;
+    auto &walls = g.walls;
 
     std::string out = "# Scene Visualiser OBJ export: metres, Y-up, one group per scene object\n";
     std::size_t next = 1; // OBJ indices are 1-based and global
@@ -475,11 +501,7 @@ std::string export_obj(const json &project, const FixtureLibrary &library, const
         }
         next += v.size();
     };
-    const auto wanted = [&](int owner) {
-        if (only.empty())
-            return true;
-        return owner >= 0 && only.contains(objects[std::size_t(owner)].value("uuid", std::string()));
-    };
+    const auto wanted = [&](int owner) { return sv::render::wanted(objects, only, owner); };
     if (wanted(-1) && tris.contains(-1))
         emit("Venue", tris[-1], nullptr);
     for (std::size_t i = 0; i < objects.size(); ++i) {
@@ -498,6 +520,81 @@ std::string export_obj(const json &project, const FixtureLibrary &library, const
         }
     }
     return out;
+}
+
+std::vector<std::uint8_t> export_fbx(const json &project, const FixtureLibrary &library, const MeshLibrary &meshes,
+                                     const std::set<std::string> &only) {
+    Gathered g;
+    gather(g, project, library, meshes);
+    const json &objects = project.value("objects", json::array());
+    static const std::map<std::string, std::string> folder{{"truss", "Trusses"},
+                                                           {"ledWall", "Walls"},
+                                                           {"pixelStrip", "Walls"},
+                                                           {"fixture", "Fixtures"},
+                                                           {"setPiece", "Set pieces"}};
+    std::vector<FbxMesh> out;
+    std::vector<FbxCamera> cameras;
+    const auto mesh = [&](std::string name, std::string parent, const std::vector<QVector3D> &v, QVector4D c) {
+        FbxMesh m{std::move(name), std::move(parent), {}, {}, {c.x(), c.y(), c.z(), 1}, false};
+        for (const QVector3D &p : v)
+            m.vertices.insert(m.vertices.end(), {p.x(), p.y(), p.z()});
+        out.push_back(std::move(m));
+        return &out.back();
+    };
+    if (wanted(objects, only, -1) && g.tris.contains(-1))
+        mesh("Venue", "", g.tris[-1], g.colour[-1]);
+    for (std::size_t i = 0; i < objects.size(); ++i) {
+        if (!wanted(objects, only, int(i)))
+            continue;
+        const json &o = objects[i];
+        const std::string name = o.value("name", std::string("Object ") + std::to_string(i + 1)),
+                          type = o.value("type", std::string());
+        const auto f = folder.find(type);
+        const std::string parent = f == folder.end() ? "Venue" : f->second;
+        if (const auto it = g.tris.find(int(i)); it != g.tris.end())
+            mesh(name, parent, it->second, g.colour[int(i)]);
+        if (const auto it = g.walls.find(int(i)); it != g.walls.end()) {
+            // The emissive screen, UV-mapped to the wall's slice of the composition (FBX UV origin bottom-left).
+            const WallInstance &w = *it->second;
+            const QVector3D a = w.model.map(QVector3D(-.5f, -.5f, 0)), b = w.model.map(QVector3D(.5f, -.5f, 0)),
+                            c = w.model.map(QVector3D(.5f, .5f, 0)), d = w.model.map(QVector3D(-.5f, .5f, 0));
+            FbxMesh *s = mesh(name + "_screen", parent, {a, b, c, a, c, d}, {1, 1, 1, 1});
+            s->emissive = true;
+            const float u0 = w.slice.x(), u1 = w.slice.x() + w.slice.z(), v0 = 1 - w.slice.y() - w.slice.w(),
+                        v1 = 1 - w.slice.y();
+            s->uvs = {u0, v0, u1, v0, u1, v1, u0, v0, u1, v1, u0, v1};
+        }
+        if (type == "camera") {
+            const auto vec = [&](const char *key, std::array<double, 3> fallback) {
+                const json &v = o.value(key, json());
+                return v.is_array() && v.size() == 3
+                           ? std::array<double, 3>{v[0].get<double>(), v[1].get<double>(), v[2].get<double>()}
+                           : fallback;
+            };
+            cameras.push_back({name, vec("position", {0, 1.7, 15}), vec("target", {0, 2, 0}), o.value("fov", 50.0)});
+        }
+    }
+    if (only.empty()) { // viewport bookmarks become cameras too
+        const json &layout = project.value("layout", json::object());
+        int n = 0;
+        if (layout.contains("cameraBookmarks") && layout.at("cameraBookmarks").is_array())
+            for (const json &b : layout.at("cameraBookmarks")) {
+                ++n;
+                const json &t = b.value("target", json::array());
+                if (!t.is_array() || t.size() != 3)
+                    continue;
+                OrbitCamera c;
+                c.target = QVector3D(t[0].get<float>(), t[1].get<float>(), t[2].get<float>());
+                c.yaw = b.value("yaw", 0.0f), c.pitch = b.value("pitch", 20.0f);
+                c.distance = b.value("distance", 20.0f), c.fov = b.value("fov", 50.0f);
+                const QVector3D e = c.eye();
+                cameras.push_back({"Bookmark " + std::to_string(n),
+                                   {e.x(), e.y(), e.z()},
+                                   {c.target.x(), c.target.y(), c.target.z()},
+                                   c.fov});
+            }
+    }
+    return write_fbx(out, cameras);
 }
 
 std::optional<std::string> pick(const RenderScene &scene, QVector3D origin, QVector3D direction) {

@@ -3,8 +3,8 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 
-// Project screen: new, open, save, save as, imports (GDTF, OBJ, Resolume, MVR, patch CSV) and exports (patch CSV,
-// grandMA3 patch, Resolume Advanced Output, OBJ, MVR). Errors show inline under the buttons.
+// Project screen: new, open, save, save as, imports (GDTF, OBJ, FBX, Resolume, MVR, patch CSV) and exports (patch
+// CSV, grandMA3 patch, Resolume Advanced Output, OBJ, FBX, MVR). Errors show inline under the buttons.
 Rectangle {
     id: screen
     color: Theme.bg
@@ -41,6 +41,11 @@ Rectangle {
         nameFilters: [qsTr("Wavefront OBJ (*.obj)")]
         onAccepted: screen.report(Session.importObj(selectedFile, unit.currentText, zUp.checked, split.checked),
                                   qsTr("Set piece imported"))
+    }
+    FileDialog {
+        id: fbxDialog
+        nameFilters: [qsTr("Autodesk FBX (*.fbx)")]
+        onAccepted: screen.report(Session.importFbx(selectedFile), qsTr("FBX imported"))
     }
     FileDialog {
         id: resolumeDialog
@@ -149,6 +154,8 @@ Rectangle {
             resolume: ["xml", qsTr("Resolume Advanced Output (*.xml)")],
             obj: ["obj", qsTr("Wavefront OBJ (*.obj)")],
             objSelection: ["obj", qsTr("Wavefront OBJ (*.obj)")],
+            fbx: ["fbx", qsTr("Autodesk FBX (*.fbx)")],
+            fbxSelection: ["fbx", qsTr("Autodesk FBX (*.fbx)")],
             mvr: ["mvr", qsTr("My Virtual Rig (*.mvr)")]
         })
         fileMode: FileDialog.SaveFile
@@ -241,6 +248,12 @@ Rectangle {
                 spacing: 6
                 Button { text: qsTr("MVR scene…"); onClicked: mvrDialog.open() }
                 Button {
+                    text: qsTr("FBX scene…")
+                    onClicked: fbxDialog.open()
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Set pieces per mesh, hierarchy kept; units and axes converted")
+                }
+                Button {
                     text: qsTr("Patch CSV…")
                     onClicked: csvDialog.open()
                     ToolTip.visible: hovered
@@ -270,6 +283,12 @@ Rectangle {
                     text: qsTr("OBJ selection…")
                     enabled: Session.selectionCount > 0
                     onClicked: screen.exportAs("objSelection")
+                }
+                Button { text: qsTr("FBX scene…"); onClicked: screen.exportAs("fbx") }
+                Button {
+                    text: qsTr("FBX selection…")
+                    enabled: Session.selectionCount > 0
+                    onClicked: screen.exportAs("fbxSelection")
                 }
             }
             Label {

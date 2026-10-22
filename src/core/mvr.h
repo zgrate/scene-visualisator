@@ -29,6 +29,8 @@ struct Transform {
     std::array<double, 3> position{}, rotation{}, scale{1, 1, 1};
 };
 Transform transform_from_mvr(const std::array<double, 12> &m);
+// The same matrix layout in our frame (metres): columns are the local axes, then the origin.
+Transform transform_from_matrix(const std::array<double, 12> &m);
 std::array<double, 12> mvr_from_transform(const Transform &t);
 
 // glTF 2.0 (.glb, or .gltf with embedded buffers) to a triangle soup, one group per mesh node, node transforms

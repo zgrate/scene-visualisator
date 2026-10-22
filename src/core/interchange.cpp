@@ -126,12 +126,48 @@ std::string ma3_patch_xml(const json &project) {
     return out + "    </Layer>\n  </Patch>\n</GMA3>\n";
 }
 
-std::vector<ObjGroup> parse_obj(std::string_view text) {
+ObjMaterials parse_mtl(std::string_view text) {
+    ObjMaterials out;
+    std::istringstream in{std::string(text)};
+    std::string line, current;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line);
+        std::string tag;
+        ls >> tag;
+        if (tag == "newmtl") {
+            std::getline(ls >> std::ws, current);
+            if (!current.empty() && current.back() == '\r')
+                current.pop_back();
+            out[current] = {0.8f, 0.8f, 0.8f, 1}; // MTL default diffuse
+        } else if (tag == "Kd" && out.contains(current)) {
+            auto &c = out[current];
+            ls >> c[0] >> c[1] >> c[2];
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> obj_mtllibs(std::string_view text) {
+    std::vector<std::string> out;
+    std::istringstream in{std::string(text)};
+    std::string line;
+    while (std::getline(in, line))
+        if (line.starts_with("mtllib ")) {
+            std::string name = line.substr(7);
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' '))
+                name.pop_back();
+            out.push_back(name);
+        }
+    return out;
+}
+
+std::vector<ObjGroup> parse_obj(std::string_view text, const ObjMaterials &materials) {
     std::vector<std::array<float, 3>> v;
     std::vector<ObjGroup> groups;
     std::istringstream in{std::string(text)};
     std::string line;
     int line_no = 0;
+    std::array<float, 4> colour{}; // current usemtl
     const auto group = [&]() -> ObjGroup & {
         if (groups.empty())
             groups.push_back({"default", {}});
@@ -159,6 +195,13 @@ std::vector<ObjGroup> parse_obj(std::string_view text) {
                 else
                     groups.push_back({name, {}});
             }
+        } else if (tag == "usemtl") {
+            std::string name;
+            std::getline(ls >> std::ws, name);
+            if (!name.empty() && name.back() == '\r')
+                name.pop_back();
+            const auto it = materials.find(name);
+            colour = it == materials.end() ? std::array<float, 4>{} : it->second;
         } else if (tag == "f") {
             std::vector<std::size_t> idx;
             std::string tok;
@@ -169,6 +212,8 @@ std::vector<ObjGroup> parse_obj(std::string_view text) {
                     throw InterchangeError("OBJ line " + std::to_string(line_no) + ": bad vertex index " + tok);
                 idx.push_back(std::size_t(resolved));
             }
+            if (group().colour[3] == 0)
+                group().colour = colour;
             for (std::size_t k = 2; k < idx.size(); ++k) {
                 const auto &a = v[idx[0]], &b = v[idx[k - 1]], &c = v[idx[k]];
                 const std::array<float, 3> e1{b[0] - a[0], b[1] - a[1], b[2] - a[2]},

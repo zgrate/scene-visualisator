@@ -1,5 +1,6 @@
 #include "session.h"
 
+#include "core/fbx.h"
 #include "core/interchange.h"
 #include "core/mvr.h"
 #include "core/resolume.h"
@@ -704,11 +705,18 @@ QString Session::exportFile(const QString &kind, const QUrl &url) {
             text = sv::ma3_patch_xml(document_.data());
         else if (kind == "resolume")
             text = sv::resolume_export(document_.data());
-        else if (kind == "obj" || kind == "objSelection") {
-            if (kind == "objSelection" && selection_.empty())
+        else if (kind == "obj" || kind == "objSelection" || kind == "fbx" || kind == "fbxSelection") {
+            const bool selection = kind.endsWith("Selection");
+            if (selection && selection_.empty())
                 return tr("Select objects first");
-            text = sv::render::export_obj(document_.data(), library_, *meshes_,
-                                          kind == "obj" ? std::set<std::string>() : selection_);
+            const std::set<std::string> only = selection ? selection_ : std::set<std::string>();
+            if (kind.startsWith("obj"))
+                text = sv::render::export_obj(document_.data(), library_, *meshes_, only);
+            else {
+                const std::vector<std::uint8_t> fbx =
+                    sv::render::export_fbx(document_.data(), library_, *meshes_, only);
+                text.assign(fbx.begin(), fbx.end());
+            }
         } else
             return tr("Unknown export %1").arg(kind);
     } catch (const std::exception &e) {
@@ -892,14 +900,17 @@ QString Session::importObj(const QUrl &url, const QString &unit, bool zUp, bool 
     } catch (const std::exception &e) {
         return QString::fromUtf8(e.what());
     }
-    // Copied into the package; a different file with the same name gets a numbered entry.
     const QFileInfo info(url.toLocalFile());
-    std::string entry = "geometry/" + info.fileName().toStdString();
-    for (int n = 2;
-         other_files_.contains(entry) && other_files_[entry] != std::vector<std::uint8_t>(bytes.begin(), bytes.end());
-         ++n)
-        entry = "geometry/" + info.completeBaseName().toStdString() + "-" + std::to_string(n) + ".obj";
-    other_files_[entry] = {bytes.begin(), bytes.end()};
+    const std::string entry = store_geometry(info, bytes);
+    // shortcut: an MTL is stored under its own name, so two OBJs naming different files "x.mtl" share the last one;
+    // rename on import when that shows up.
+    for (const std::string &lib : sv::obj_mtllibs({bytes.constData(), std::size_t(bytes.size())})) {
+        QFile mtl(info.dir().filePath(QString::fromStdString(lib)));
+        if (mtl.open(QIODevice::ReadOnly)) {
+            const QByteArray text = mtl.readAll();
+            other_files_["geometry/" + lib] = {text.begin(), text.end()};
+        }
+    }
     rebuild_meshes();
 
     const double scale = sv::unit_scale(unit.toStdString());
@@ -921,6 +932,59 @@ QString Session::importObj(const QUrl &url, const QString &unit, bool zUp, bool 
     else
         piece(info.completeBaseName().toStdString(), {});
     if (apply(patch, "Import OBJ")) {
+        selection_ = added;
+        refresh();
+    }
+    return {};
+}
+
+std::string Session::store_geometry(const QFileInfo &info, const QByteArray &bytes) {
+    const std::vector<std::uint8_t> data(bytes.begin(), bytes.end());
+    std::string entry = "geometry/" + info.fileName().toStdString();
+    for (int n = 2; other_files_.contains(entry) && other_files_[entry] != data; ++n)
+        entry = "geometry/" + info.completeBaseName().toStdString() + "-" + std::to_string(n) + "." +
+                info.suffix().toStdString();
+    other_files_[entry] = data;
+    return entry;
+}
+
+QString Session::importFbx(const QUrl &url) {
+    QString error;
+    const QByteArray bytes = read_file(url, error);
+    if (!error.isEmpty())
+        return error;
+    sv::FbxScene scene;
+    try {
+        scene = sv::load_fbx({reinterpret_cast<const std::uint8_t *>(bytes.constData()), std::size_t(bytes.size())});
+    } catch (const std::exception &e) {
+        return QString::fromUtf8(e.what());
+    }
+    const std::string entry = store_geometry(QFileInfo(url.toLocalFile()), bytes);
+    rebuild_meshes();
+
+    json patch = json::array();
+    std::vector<std::string> uuids;
+    std::set<std::string> added;
+    for (const sv::FbxNode &n : scene.nodes) {
+        json o;
+        if (n.group >= 0) {
+            o = sv::new_set_piece(n.name, entry);
+            o["group"] = scene.groups[std::size_t(n.group)].name;
+        } else {
+            o = sv::new_set_piece(n.name, "");
+            o["type"] = "group";
+            o.erase("geometry");
+        }
+        o["position"] = n.transform.position;
+        o["rotation"] = n.transform.rotation;
+        o["scale"] = n.transform.scale;
+        if (n.parent >= 0)
+            o["parent"] = uuids[std::size_t(n.parent)];
+        uuids.push_back(o["uuid"].get<std::string>());
+        added.insert(uuids.back());
+        patch.push_back({{"op", "add"}, {"path", "/objects/-"}, {"value", std::move(o)}});
+    }
+    if (apply(patch, "Import FBX")) {
         selection_ = added;
         refresh();
     }
@@ -1066,18 +1130,37 @@ void Session::rebuild_meshes() {
     auto lib = std::make_shared<sv::render::MeshLibrary>();
     for (const auto &[entry, bytes] : other_files_) {
         const QString name = QString::fromStdString(entry);
-        const bool obj = name.endsWith(".obj", Qt::CaseInsensitive);
+        const bool obj = name.endsWith(".obj", Qt::CaseInsensitive), fbx = name.endsWith(".fbx", Qt::CaseInsensitive);
         if (!entry.starts_with("geometry/") ||
-            !(obj || name.endsWith(".glb", Qt::CaseInsensitive) || name.endsWith(".gltf", Qt::CaseInsensitive)))
+            !(obj || fbx || name.endsWith(".glb", Qt::CaseInsensitive) || name.endsWith(".gltf", Qt::CaseInsensitive)))
             continue;
         try {
+            std::vector<sv::ObjGroup> groups;
+            if (obj) {
+                const std::string_view text(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+                sv::ObjMaterials materials;
+                for (const std::string &mtl : sv::obj_mtllibs(text))
+                    if (const auto it = other_files_.find("geometry/" + mtl); it != other_files_.end())
+                        materials.merge(
+                            sv::parse_mtl({reinterpret_cast<const char *>(it->second.data()), it->second.size()}));
+                groups = sv::parse_obj(text, materials);
+            } else
+                groups = fbx ? sv::load_fbx(bytes).groups : sv::parse_gltf(bytes);
+            // FBX groups are in node space and only make sense per node, so FBX has no whole-file mesh.
             std::vector<float> all;
-            for (sv::ObjGroup &g : obj ? sv::parse_obj({reinterpret_cast<const char *>(bytes.data()), bytes.size()})
-                                       : sv::parse_gltf(bytes)) {
-                all.insert(all.end(), g.vertices.begin(), g.vertices.end());
-                (*lib)[entry + "#" + g.name] = sv::render::make_mesh(std::move(g.vertices));
+            for (sv::ObjGroup &g : groups) {
+                if (!fbx)
+                    all.insert(all.end(), g.vertices.begin(), g.vertices.end());
+                const QVector4D colour(g.colour[0], g.colour[1], g.colour[2], g.colour[3]);
+                (*lib)[entry + "#" + g.name] = sv::render::make_mesh(std::move(g.vertices), colour);
             }
-            (*lib)[entry] = sv::render::make_mesh(std::move(all));
+            if (!fbx && !groups.empty()) {
+                const auto same = [&](const sv::ObjGroup &g) { return g.colour == groups.front().colour; };
+                const auto &c = groups.front().colour;
+                (*lib)[entry] = sv::render::make_mesh(std::move(all), std::ranges::all_of(groups, same)
+                                                                          ? QVector4D(c[0], c[1], c[2], c[3])
+                                                                          : QVector4D());
+            }
         } catch (const std::exception &e) {
             qCWarning(lcSession) << "geometry" << entry.c_str() << "failed:" << e.what();
         }

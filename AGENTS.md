@@ -38,7 +38,7 @@ python3 tools/dmx_send.py --proto sacn --universes 1-4 --pattern chase   # test 
 ## 3. Layout & boundaries
 | Target | Path | May use |
 |---|---|---|
-| `sv_core` | `src/core` | std, nlohmann_json, miniz, pugixml, cgltf. **No Qt.** Model, `.svproj`, undo, exporters, OBJ, MVR |
+| `sv_core` | `src/core` | std, nlohmann_json, miniz, pugixml, cgltf, ufbx. **No Qt.** Model, `.svproj`, undo, exporters, OBJ, MVR, FBX |
 | `sv_gdtf` | `src/gdtf` | std, pugixml, miniz. **No Qt.** GDTF reader, DMX→attribute decoder |
 | `sv_proto` | `src/protocol` | std, Asio (private). **No Qt.** Art-Net/sACN receivers, merger, triple buffer, generators |
 | `sv_render` | `src/render` | Qt Gui + QRhi only (no Quick/QML). Scene, beam and wall passes, shaders via `qt_add_shaders` |
@@ -298,3 +298,19 @@ Hard rules:
   Capture/Vectorworks presets yet. `csv_import` updates fixtures whose `fixtureId` matches and adds the rest. Session
   `csvPreview(url)` feeds the mapping dialog, and `importCsv(url, mapping, unit, zUp)` resolves type text against the
   library (file name, `Manufacturer@Name` or type name).
+
+## 19. FBX and OBJ materials (B5)
+- **`core/fbx.h`:** `load_fbx(bytes)` reads through ufbx (axes and units converted to Y-up metres) into `FbxScene`:
+  nodes with a mesh somewhere below them (parent index, `Transform`, `group` index) and one `ObjGroup` per mesh
+  node in node space, with its first material's base colour. `write_fbx(meshes, cameras)` is our binary FBX 7.4
+  writer: world-space meshes under group nulls, emissive `_screen` quads with UVs, cameras (rotation order ZYX).
+- **Render:** `export_fbx(project, library, meshes, only)` shares the gathering with `export_obj`.
+- **Session:** `importFbx(url)` stores the file under `geometry/`, adds a set piece (`group` = node mesh name) per
+  mesh node and a `group` object per empty node, parents kept, one undo step. `exportFile` takes `fbx` and
+  `fbxSelection`. FBX meshes are keyed only per group (`geometry/x.fbx#Name`), never as a whole file.
+- **OBJ materials:** `parse_mtl`, `obj_mtllibs`; `importObj` copies the MTL files named by `mtllib` into
+  `geometry/`. `Mesh::colour` (alpha 0 = default grey) tints set pieces.
+- **AT-4 check:** `tools/blender_check.py` opens the FBX and OBJ that `sv_session_tests` leaves in
+  `/tmp/sv_session_tests/` and asserts names, metres, Z-up in Blender and the camera direction. CI runs it with
+  apt's Blender; locally use a `pip install bpy` venv.
+

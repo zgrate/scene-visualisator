@@ -364,12 +364,11 @@ struct Writer {
 
 } // namespace
 
-Transform transform_from_mvr(const std::array<double, 12> &m) {
-    M3 a{};
+Transform transform_from_matrix(const std::array<double, 12> &m) {
+    M3 l{};
     for (int c = 0; c < 3; ++c)
         for (int r = 0; r < 3; ++r)
-            a[r][c] = m[std::size_t(c * 3 + r)];
-    M3 l = mul(mul(to_ours, a), transposed(to_ours));
+            l[r][c] = m[std::size_t(c * 3 + r)];
     Transform t;
     for (int c = 0; c < 3; ++c) {
         double s = std::hypot(l[0][c], l[1][c], l[2][c]);
@@ -392,9 +391,23 @@ Transform transform_from_mvr(const std::array<double, 12> &m) {
     const auto cost = [](const std::array<double, 3> &r) { return std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]); };
     t.rotation = cost(rb) < cost(ra) - 1e-6 ? rb : ra;
     for (int r = 0; r < 3; ++r)
-        t.position[std::size_t(r)] =
-            tidy((to_ours[r][0] * m[9] + to_ours[r][1] * m[10] + to_ours[r][2] * m[11]) / 1000, 1e-6);
+        t.position[std::size_t(r)] = tidy(m[std::size_t(9 + r)], 1e-6);
     return t;
+}
+
+Transform transform_from_mvr(const std::array<double, 12> &m) {
+    M3 a{};
+    for (int c = 0; c < 3; ++c)
+        for (int r = 0; r < 3; ++r)
+            a[r][c] = m[std::size_t(c * 3 + r)];
+    const M3 l = mul(mul(to_ours, a), transposed(to_ours));
+    std::array<double, 12> ours{};
+    for (int c = 0; c < 3; ++c)
+        for (int r = 0; r < 3; ++r)
+            ours[std::size_t(c * 3 + r)] = l[r][c];
+    for (int r = 0; r < 3; ++r)
+        ours[std::size_t(9 + r)] = (to_ours[r][0] * m[9] + to_ours[r][1] * m[10] + to_ours[r][2] * m[11]) / 1000;
+    return transform_from_matrix(ours);
 }
 
 std::array<double, 12> mvr_from_transform(const Transform &t) {

@@ -25,10 +25,16 @@ std::string ma3_patch_xml(const json &project); // FR-23
 struct ObjGroup {
     std::string name; // "o" or "g" name, "default" before the first one
     std::vector<float> vertices;
+    std::array<float, 4> colour{}; // material base colour, alpha 0 when the group has none
 };
-// Polygons are fanned into triangles; vt/vn and materials are ignored.
-// shortcut: no MTL materials (set pieces render grey), switch to tinyobjloader when materials are needed.
-std::vector<ObjGroup> parse_obj(std::string_view text); // throws InterchangeError on bad indices or no faces
+// MTL (B5): material name -> Kd diffuse colour with alpha 1.
+using ObjMaterials = std::map<std::string, std::array<float, 4>, std::less<>>;
+ObjMaterials parse_mtl(std::string_view text);
+std::vector<std::string> obj_mtllibs(std::string_view text); // "mtllib" file names, in order
+// Polygons are fanned into triangles; vt/vn are ignored.
+// shortcut: one colour per group (its first usemtl) and no textures; split groups by material when mixed groups
+// or textured set pieces matter.
+std::vector<ObjGroup> parse_obj(std::string_view text, const ObjMaterials &materials = {}); // throws InterchangeError
 
 // CSV patch import (FR-23): our own patch CSV, Capture and Vectorworks exports. Separator is ',', ';' or tab,
 // whichever the header line has most of; quotes as RFC 4180.

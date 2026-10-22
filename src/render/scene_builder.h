@@ -27,8 +27,9 @@ struct FixtureState {
 struct Mesh {
     std::vector<float> vertices;
     QVector3D lo, hi;
+    QVector4D colour; // material base colour (OBJ MTL, FBX); alpha 0: the default set-piece grey
 };
-std::shared_ptr<const Mesh> make_mesh(std::vector<float> vertices);
+std::shared_ptr<const Mesh> make_mesh(std::vector<float> vertices, QVector4D colour = {});
 // By package path ("geometry/stage.obj") and per OBJ group ("geometry/stage.obj#Truss").
 using MeshLibrary = std::map<std::string, std::shared_ptr<const Mesh>, std::less<>>;
 
@@ -89,6 +90,11 @@ RenderScene build_scene(const json &project, const std::map<std::string, Fixture
 // only: uuids to export, all objects when empty. Metres, Y-up.
 std::string export_obj(const json &project, const FixtureLibrary &library, const MeshLibrary &meshes,
                        const std::set<std::string> &only = {});
+// FR-25 FBX export of the same scene: one mesh per object under group nulls (Trusses, Walls, Fixtures, Set pieces,
+// Venue), walls' screens as emissive quads UV-mapped to their slice, and camera objects plus viewport bookmarks (whole
+// scene only) as FBX cameras.
+std::vector<std::uint8_t> export_fbx(const json &project, const FixtureLibrary &library, const MeshLibrary &meshes,
+                                     const std::set<std::string> &only = {});
 // What the internal generators (FR-11) drive for each patched fixture of a known type.
 std::vector<proto::GeneratorTarget> generator_targets(const json &project, const FixtureLibrary &library);
 

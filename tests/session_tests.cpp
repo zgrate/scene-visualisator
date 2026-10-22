@@ -362,3 +362,51 @@ TEST_CASE("Session previews a CSV, maps its columns and imports fixtures by type
     CHECK(s.document().data()["objects"].size() == 2);
     CHECK(s.csvPreview(QUrl::fromLocalFile("/nonexistent.csv")).contains("error"));
 }
+
+TEST_CASE("Session exports FBX and imports it back as set pieces under groups, one undo step (FR-25, AT-4)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const QUrl fbx = QUrl::fromLocalFile(QString::fromStdString((dir / "rig.fbx").string()));
+    Session s(nullptr);
+    json rig = sv::demo_project();
+    rig["objects"].push_back(sv::new_camera("FOH camera"));
+    rig["layout"]["cameraBookmarks"] =
+        json::array({{{"target", {0, 2, 0}}, {"yaw", 0}, {"pitch", 10}, {"distance", 18}, {"fov", 45}}});
+    s.set_project(rig);
+    REQUIRE(s.exportFile("fbx", fbx).isEmpty());
+    // Also the OBJ of the same rig, so tools/blender_check.py can open both (CI runs it after the tests).
+    REQUIRE(s.exportFile("obj", QUrl::fromLocalFile(QString::fromStdString((dir / "rig.obj").string()))).isEmpty());
+    CHECK(s.exportFile("fbxSelection", fbx).size() > 0); // nothing selected
+
+    Session t(nullptr);
+    t.set_project(sv::new_project());
+    REQUIRE(t.importFbx(fbx).isEmpty());
+    const json &objects = t.document().data()["objects"];
+    std::map<std::string, int> types;
+    std::set<std::string> names;
+    for (const json &o : objects)
+        ++types[o["type"].get<std::string>()], names.insert(o["name"].get<std::string>());
+    CHECK(types["group"] >= 3); // Trusses, Walls, Fixtures; the venue mesh sits at the root
+    CHECK(types["setPiece"] > 10);
+    CHECK(names.contains("Trusses"));
+    for (const json &o : objects)
+        if (o["type"] == "setPiece") {
+            CHECK((o["parent"].is_string() || o["name"] == "Venue")); // object meshes sit under their group null
+            CHECK(t.meshes()->contains(o["geometry"].get<std::string>() + "#" + o["group"].get<std::string>()));
+        }
+    // World-space vertices come back where they were: the scene bounds match within a millimetre.
+    const auto bounds = [](const sv::render::RenderScene &scene) {
+        float hi = -1e9f;
+        for (const auto &m : scene.meshes)
+            for (std::size_t i = 1; i < m.mesh->vertices.size(); i += 6)
+                hi = std::max(
+                    hi,
+                    m.model.map(QVector3D(m.mesh->vertices[i - 1], m.mesh->vertices[i], m.mesh->vertices[i + 1])).y());
+        return hi;
+    };
+    const auto scene = sv::render::build_scene(*t.snapshot(), {}, {}, 0, *t.meshes());
+    CHECK(bounds(scene) > 2); // trusses hang well above the deck
+    t.undo();
+    CHECK(t.document().data()["objects"].empty());
+    CHECK(t.importFbx(QUrl::fromLocalFile("/nonexistent.fbx")).size() > 0);
+}

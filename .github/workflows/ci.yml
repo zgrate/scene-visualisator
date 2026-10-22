@@ -34,6 +34,13 @@ jobs:
       - run: cmake --preset ${{ matrix.preset }}
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
+      # AT-4: the session tests leave the demo rig as FBX and OBJ in the temp folder; Blender must open both.
+      - name: Blender opens our FBX and OBJ (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y blender
+          blender --background --factory-startup --python tools/blender_check.py -- \
+            /tmp/sv_session_tests/rig.fbx /tmp/sv_session_tests/rig.obj
 
       # Render smoke: real window, real RHI backend (OpenGL/llvmpipe, D3D on WARP, Metal), saved as PNG.
       - name: Smoke screenshot (Linux)

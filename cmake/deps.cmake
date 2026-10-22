@@ -34,6 +34,16 @@ FetchContent_MakeAvailable(cgltf)
 add_library(cgltf INTERFACE)
 target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
 
+# FBX import (B5): ufbx, one C file, MIT or public domain. The FBX writer is ours (core/fbx.cpp).
+FetchContent_Declare(ufbx
+    URL https://github.com/ufbx/ufbx/archive/refs/tags/v0.23.1.tar.gz
+    URL_HASH SHA256=21edd1021dfb430e37aa6214c9b3bbaa5634b1859cbbef7231e738af4f19c956)
+FetchContent_MakeAvailable(ufbx)
+enable_language(C)
+add_library(ufbx STATIC ${ufbx_SOURCE_DIR}/ufbx.c)
+target_include_directories(ufbx SYSTEM PUBLIC ${ufbx_SOURCE_DIR})
+set_target_properties(ufbx PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Standalone Asio (header-only) for the network thread. sACN uses our own E1.31 receiver on it, not the ETCLabs
 # library (the spec's named fallback): one socket model, no EtcPal threads.
 FetchContent_Declare(asio

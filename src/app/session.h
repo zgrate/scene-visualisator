@@ -131,7 +131,7 @@ class Session : public QObject {
     // Patches the selected fixtures one after another in fixture ID order from "universe.address" (FR-8).
     Q_INVOKABLE QString readdressSelection(const QString &start);
     Q_INVOKABLE void selectUuids(const QStringList &uuids);
-    // kind: csv, ma3, resolume, obj (whole scene) or objSelection.
+    // kind: csv, ma3, resolume, mvr, obj or fbx (whole scene), objSelection or fbxSelection.
     Q_INVOKABLE QString exportFile(const QString &kind, const QUrl &url);
     // pitch: mm per composition pixel for new walls and strips; place: put new objects where the composition draws
     // them.
@@ -145,12 +145,16 @@ class Session : public QObject {
     // it exists, so QML can confirm the overwrite before exportFile("resolume", path). Never the live
     // AdvancedOutput.xml.
     Q_INVOKABLE QVariantMap resolumePreset() const;
-    // unit: m, cm, mm, in, ft. zUp rotates the file to Y-up. split: one set piece per OBJ group (FR-3).
     // Screens or window titles for a capture kind (FR-14).
     Q_INVOKABLE QStringList mediaSources(const QString &kind) const { return sv::media::MediaSource::available(kind); }
     // kind still or video: copies the file into media/ (linked by absolute path above 200 MB) and selects it.
     Q_INVOKABLE QString setMediaFile(const QString &kind, const QUrl &url);
+    // unit: m, cm, mm, in, ft. zUp rotates the file to Y-up. split: one set piece per OBJ group (FR-3). MTL files
+    // named by mtllib are copied along and colour the groups.
     Q_INVOKABLE QString importObj(const QUrl &url, const QString &unit, bool zUp, bool split);
+    // FR-25: one set piece per FBX mesh node and a group per empty node, hierarchy and transforms kept, in one
+    // undo step. Units and axes are converted by the reader.
+    Q_INVOKABLE QString importFbx(const QUrl &url);
     // FR-22: merges an MVR scene in one undo step; objects whose UUID already exists get a new one.
     Q_INVOKABLE QString importMvr(const QUrl &url);
     // FR-23: {header, rows (first 8), mapping {field: column}, fields, error} for the CSV mapping dialog.
@@ -172,6 +176,8 @@ class Session : public QObject {
     void add_object(sv::json object, const char *label);
     void add_gdtf(const std::string &name, std::vector<std::uint8_t> bytes); // throws on a bad file
     void rebuild_meshes();
+    // Copies a geometry file into the package as geometry/<name>; a different file with that name gets "-2" etc.
+    std::string store_geometry(const QFileInfo &info, const QByteArray &bytes);
     void update_media(); // opens or reconfigures media_ when composition.source changed
     void check_recovery();
     sv::Package package() const; // the document plus the GDTF types it uses and the other package files
