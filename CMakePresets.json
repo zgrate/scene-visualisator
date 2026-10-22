@@ -1,0 +1,43 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT_DIR};$env{SV_EXTRA_PREFIX}",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    { "name": "linux-debug", "inherits": "base", "generator": "Ninja", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "linux-release", "inherits": "base", "generator": "Ninja", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "mac", "inherits": "base", "generator": "Ninja", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "win-msvc", "inherits": "base", "generator": "Visual Studio 17 2022", "architecture": "x64" },
+    {
+      "name": "win-mingw",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/mingw-w64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "QT_HOST_PATH": "$env{QT_HOST_PATH}",
+        "BUILD_TESTING": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-debug", "configurePreset": "linux-debug" },
+    { "name": "linux-release", "configurePreset": "linux-release" },
+    { "name": "mac", "configurePreset": "mac" },
+    { "name": "win-msvc", "configurePreset": "win-msvc", "configuration": "Release" },
+    { "name": "win-mingw", "configurePreset": "win-mingw" }
+  ],
+  "testPresets": [
+    { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },
+    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } },
+    { "name": "mac", "configurePreset": "mac", "output": { "outputOnFailure": true } },
+    { "name": "win-msvc", "configurePreset": "win-msvc", "configuration": "Release", "output": { "outputOnFailure": true } }
+  ]
+}

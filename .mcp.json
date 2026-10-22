@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gui-user": {
+      "type": "stdio",
+      "command": "/home/debian/.local/src/gui-user/.venv/bin/gui-user-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

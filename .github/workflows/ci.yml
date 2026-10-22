@@ -1,0 +1,53 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, preset: linux-debug, app: build/linux-debug/bin/SceneVisualiser }
+          - { os: windows-2022, preset: win-msvc, app: build/win-msvc/bin/Release/SceneVisualiser.exe }
+          - { os: macos-14, preset: mac, app: build/mac/bin/SceneVisualiser.app/Contents/MacOS/SceneVisualiser }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build xvfb libgl-dev libegl-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0
+      - name: macOS packages
+        if: runner.os == 'macOS'
+        run: brew install ninja || true
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.12.0'
+          modules: 'qtshadertools'
+          aqtversion: '==3.3.*'
+          cache: true
+
+      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.preset }}
+
+      # Render smoke: real window, real RHI backend (OpenGL/llvmpipe, D3D on WARP, Metal), saved as PNG.
+      - name: Smoke screenshot (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1600x1000x24" ${{ matrix.app }} --screenshot smoke-${{ runner.os }}.png
+      - name: Smoke screenshot (Windows/macOS)
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          QSG_RHI_PREFER_SOFTWARE_RENDERER: '1'
+        run: ${{ matrix.app }} --screenshot smoke-${{ runner.os }}.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ runner.os }}
+          path: smoke-*.png
+          if-no-files-found: warn

@@ -1,0 +1,10 @@
+/build/
+CMakeUserPresets.json
+.claude/settings.local.json
+.cache/
+*.png
+!tests/golden/*.png
+# Spec artifact sources (published at https://artifacts.zgrate.ovh/a/KGhqn7zy8Lwo); holds credentials.json
+/.artifacts/
+/.playwright-mcp/
+aqtinstall.log

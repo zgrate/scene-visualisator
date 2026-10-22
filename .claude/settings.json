@@ -1,0 +1,36 @@
+{
+  "enabledPlugins": {
+    "qt-development-skills@claude-plugins-official": true,
+    "qt-suite@l3digitalnet-plugins": true,
+    "clangd-lsp@claude-plugins-official": true,
+    "code-review@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cmake:*)",
+      "Bash(ctest:*)",
+      "Bash(xvfb-run:*)",
+      "Bash(tools/*.sh:*)",
+      "Bash(python3 tools/*.py:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(clang-format:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{ "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/tools/hooks/format-edited.sh" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/tools/hooks/stop-check.sh", "timeout": 600 }]
+      }
+    ]
+  }
+}
