@@ -54,6 +54,10 @@ class Session : public QObject {
     // Composition source state (FR-13): {kind, width, height, fps, signal, error}, refreshed with dmxStatus.
     Q_PROPERTY(QVariantMap mediaStatus READ media_status NOTIFY dmxChanged)
     Q_PROPERTY(QVariantMap appInfo READ app_info CONSTANT) // version, updates/crash upload support, crash folder (B7)
+    Q_PROPERTY(QVariantList recentFiles READ recent_files NOTIFY changed) // {path, name, url}, newest first, existing
+    Q_PROPERTY(
+        QStringList missingFiles READ missing_files NOTIFY changed) // referenced but not found: types, geometry, media
+    Q_PROPERTY(QStringList linkedMedia READ linked_media NOTIFY changed) // media linked by absolute path, not packed
 
   public:
     explicit Session(QObject *parent); // no default: QML would construct its own instead of calling create()
@@ -180,10 +184,19 @@ class Session : public QObject {
     Q_INVOKABLE QString importCsv(const QUrl &url, const QVariantMap &mapping, const QString &unit, bool zUp);
     Q_INVOKABLE QString recover();      // opens the autosave in place of the saved file, unsaved
     Q_INVOKABLE void discardRecovery(); // deletes the autosave
+    // "Don't save": deletes the current project's autosave, so the discarded edits are not offered back on launch.
+    Q_INVOKABLE void discardChanges();
+    // Copies linked media (composition.source.file outside the package) into media/, so the project travels whole.
+    Q_INVOKABLE QString packMedia();
+    QVariantList recent_files() const;
+    QStringList missing_files() const;
+    QStringList linked_media() const;
 
   Q_SIGNALS:
     void changed();
     void dmxChanged();
+    void projectOpened();                // after openProject succeeds, for the missing-files warning
+    void openRequested(const QUrl &url); // a file handed over by the OS (macOS Finder); QML checks unsaved edits
 
   private:
     void refresh();
@@ -197,6 +210,8 @@ class Session : public QObject {
     QVariantList list_of(const char *key) const; // a top-level array of the project, empty when missing
     // Copies a geometry file into the package as geometry/<name>; a different file with that name gets "-2" etc.
     std::string store_geometry(const QFileInfo &info, const QByteArray &bytes);
+    std::string store_media(const QFileInfo &info, const QByteArray &bytes); // media/<name>, same rule
+    void remember_recent(const std::filesystem::path &path);
     void update_media(); // opens or reconfigures media_ when composition.source changed
     void check_recovery();
     sv::Package package() const; // the document plus the GDTF types it uses and the other package files

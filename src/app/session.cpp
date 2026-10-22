@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <climits>
 #include <ranges>
+#include <set>
 
 Q_LOGGING_CATEGORY(lcSession, "sv.session")
 
@@ -555,6 +556,8 @@ QString Session::openProject(const QUrl &url) {
     } catch (const std::exception &e) {
         return QString::fromUtf8(e.what());
     }
+    remember_recent(path);
+    Q_EMIT projectOpened();
     return {};
 }
 
@@ -583,6 +586,7 @@ QString Session::saveProject(const QUrl &url) {
     path_ = path;
     name_ = QString::fromStdU16String(path.stem().u16string());
     recovery_.clear();
+    remember_recent(path);
     Q_EMIT changed();
     return {};
 }
@@ -881,13 +885,7 @@ QString Session::setMediaFile(const QString &kind, const QUrl &url) {
             return error;
         if (kind == "still" && QImage::fromData(bytes).isNull())
             return tr("Not an image: %1").arg(info.fileName());
-        file = "media/" + info.fileName().toStdString();
-        for (int n = 2;
-             other_files_.contains(file) && other_files_[file] != std::vector<std::uint8_t>(bytes.begin(), bytes.end());
-             ++n)
-            file = "media/" + info.completeBaseName().toStdString() + "-" + std::to_string(n) + "." +
-                   info.suffix().toStdString();
-        other_files_[file] = {bytes.begin(), bytes.end()};
+        file = store_media(info, bytes);
     }
     json source = {{"kind", kind.toStdString()}, {"file", file}, {"name", info.fileName().toStdString()}};
     if (kind == "video")
@@ -1220,6 +1218,86 @@ QString Session::recover() {
     return {};
 }
 
+std::string Session::store_media(const QFileInfo &info, const QByteArray &bytes) {
+    std::string file = "media/" + info.fileName().toStdString();
+    for (int n = 2;
+         other_files_.contains(file) && other_files_[file] != std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+         ++n)
+        file = "media/" + info.completeBaseName().toStdString() + "-" + std::to_string(n) + "." +
+               info.suffix().toStdString();
+    other_files_[file] = {bytes.begin(), bytes.end()};
+    return file;
+}
+
+namespace {
+QSettings settings() { return QSettings("SceneVisualiser", "Scene Visualiser"); }
+
+std::string media_file(const json &project) {
+    const json &comp = project.value("composition", json::object());
+    const json src = comp.is_object() ? comp.value("source", json::object()) : json::object();
+    return src.is_object() ? src.value("file", std::string()) : std::string();
+}
+} // namespace
+
+void Session::remember_recent(const std::filesystem::path &path) {
+    const QString p = QString::fromStdU16String(path.u16string());
+    QStringList list = settings().value("recentFiles").toStringList();
+    list.removeAll(p);
+    list.prepend(p);
+    settings().setValue("recentFiles", list.mid(0, 10));
+}
+
+QVariantList Session::recent_files() const {
+    QVariantList out;
+    for (const QString &p : settings().value("recentFiles").toStringList())
+        if (const QFileInfo info(p); info.isFile())
+            out.append(QVariantMap{{"path", p}, {"name", info.completeBaseName()}, {"url", QUrl::fromLocalFile(p)}});
+    return out;
+}
+
+QStringList Session::missing_files() const {
+    std::set<QString> out;
+    for (const json &o : document_.data().at("objects")) {
+        if (const std::string type = o.value("gdtf", std::string()); !type.empty() && !library_.contains(type))
+            out.insert(tr("Fixture type %1").arg(QString::fromStdString(type)));
+        if (const std::string geo = o.value("geometry", std::string()); !geo.empty() && !other_files_.contains(geo))
+            out.insert(tr("Geometry %1").arg(QString::fromStdString(geo)));
+    }
+    if (const std::string file = media_file(document_.data()); !file.empty()) {
+        const bool found =
+            file.starts_with("media/") ? other_files_.contains(file) : QFileInfo(QString::fromStdString(file)).isFile();
+        if (!found)
+            out.insert(tr("Media %1").arg(QString::fromStdString(file)));
+    }
+    return {out.begin(), out.end()};
+}
+
+QStringList Session::linked_media() const {
+    const std::string file = media_file(document_.data());
+    if (file.empty() || file.starts_with("media/") || !QFileInfo(QString::fromStdString(file)).isFile())
+        return {};
+    return {QString::fromStdString(file)};
+}
+
+QString Session::packMedia() {
+    const QStringList linked = linked_media();
+    if (linked.isEmpty())
+        return tr("No linked media to pack");
+    QString error;
+    const QByteArray bytes = read_file(QUrl::fromLocalFile(linked.first()), error);
+    if (!error.isEmpty())
+        return error;
+    const std::string file = store_media(QFileInfo(linked.first()), bytes);
+    if (apply(json::array({{{"op", "replace"}, {"path", "/composition/source/file"}, {"value", file}}}), "Pack media"))
+        refresh();
+    return {};
+}
+
+void Session::discardChanges() {
+    std::error_code ec;
+    std::filesystem::remove(sv::autosave_path(autosave_target()), ec);
+}
+
 void Session::discardRecovery() {
     std::error_code ec;
     std::filesystem::remove(recovery_.toStdU16String(), ec);
@@ -1319,13 +1397,13 @@ QVariantList Session::list_of(const char *key) const {
 QVariant Session::preference(const QString &key, const QVariant &fallback) {
     if (key == "autoUpdate")
         return sv::updater::automatic();
-    return QSettings("SceneVisualiser", "Scene Visualiser").value(key, fallback);
+    return settings().value(key, fallback);
 }
 
 void Session::setPreference(const QString &key, const QVariant &value) {
     if (key == "autoUpdate")
         return sv::updater::set_automatic(value.toBool());
-    QSettings("SceneVisualiser", "Scene Visualiser").setValue(key, value);
+    settings().setValue(key, value);
     if (key == "crashReports")
         sv::crash::set_consent(value.toBool());
 }

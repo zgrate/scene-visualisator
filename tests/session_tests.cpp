@@ -10,6 +10,7 @@
 #include <QGuiApplication>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
@@ -308,7 +309,11 @@ TEST_CASE(
 }
 
 int main(int argc, char *argv[]) {
-    QStandardPaths::setTestModeEnabled(true);           // the untitled autosave goes to a test location
+    QStandardPaths::setTestModeEnabled(true); // the untitled autosave goes to a test location
+    // Recent files and preferences go to a scratch folder, never the developer's own settings.
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope,
+                       QString::fromStdString((std::filesystem::temp_directory_path() / "sv_settings").string()));
+    QSettings("SceneVisualiser", "Scene Visualiser").clear();
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) // also covers test discovery at build time
         qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv); // composition text needs fonts
@@ -569,4 +574,79 @@ TEST_CASE("NDI loopback: a local sender is found, received as BGRA and followed 
 
     media.open({}, {}); // joins the receiver thread before the sender goes away
     ndi->send_destroy(sender);
+}
+
+TEST_CASE("Session keeps ten recent projects, newest first, dropping files that are gone") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests" / "recent";
+    std::filesystem::create_directories(dir);
+    const auto url = [&](int i) {
+        return QUrl::fromLocalFile(QString::fromStdString((dir / "p").string()) + QString::number(i) + ".svproj");
+    };
+    QSettings("SceneVisualiser", "Scene Visualiser").remove("recentFiles");
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    for (int i = 0; i < 12; ++i)
+        REQUIRE(s.saveProject(url(i)).isEmpty());
+    QVariantList recent = s.recent_files();
+    REQUIRE(recent.size() == 10);
+    CHECK(recent.front().toMap()["url"].toUrl() == url(11));
+    CHECK(recent.front().toMap()["name"] == "p11");
+
+    REQUIRE(s.openProject(url(5)).isEmpty()); // opening moves it to the top without a duplicate
+    recent = s.recent_files();
+    CHECK(recent.size() == 10);
+    CHECK(recent.front().toMap()["url"].toUrl() == url(5));
+
+    std::filesystem::remove(url(11).toLocalFile().toStdString());
+    recent = s.recent_files();
+    CHECK(recent.size() == 9);
+    CHECK(std::ranges::none_of(recent, [&](const QVariant &r) { return r.toMap()["url"].toUrl() == url(11); }));
+}
+
+TEST_CASE("Session lists missing types, geometry and media, and packs linked media into the project") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const QString png = QString::fromStdString((dir / "linked.png").string());
+    QImage(4, 4, QImage::Format_RGB32).save(png);
+
+    json p = sv::new_project();
+    p["objects"].push_back(sv::new_fixture("Lost", "Nobody@Nothing.gdtf", "Default"));
+    p["objects"].push_back(sv::new_set_piece("Gone", "geometry/gone.obj"));
+    p["objects"].push_back(sv::new_fixture("Here", "Generic@Spot_7ch.gdtf", "Default"));
+    p["composition"]["source"] = {{"kind", "still"}, {"file", png.toStdString()}, {"name", "linked.png"}};
+    Session s(nullptr);
+    s.set_project(p);
+    CHECK(s.missing_files() == QStringList{"Fixture type Nobody@Nothing.gdtf", "Geometry geometry/gone.obj"});
+    CHECK(s.linked_media() == QStringList{png});
+
+    REQUIRE(s.packMedia().isEmpty());
+    CHECK(s.linked_media().isEmpty());
+    CHECK(s.document().data()["composition"]["source"]["file"] == "media/linked.png");
+    CHECK(s.dirty());
+    CHECK_FALSE(s.packMedia().isEmpty()); // nothing left to pack
+
+    const auto path = dir / "packed.svproj";
+    REQUIRE(s.saveProject(QUrl::fromLocalFile(QString::fromStdString(path.string()))).isEmpty());
+    CHECK(sv::load_package(path).files.contains("media/linked.png"));
+
+    s.edit("composition", "/source/file", png + ".gone");
+    CHECK(s.missing_files().contains("Media " + png + ".gone"));
+}
+
+TEST_CASE("Session \"Don't save\" deletes the autosave, so discarded edits are not offered back (AT-6)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "discard.svproj";
+    const QUrl url = QUrl::fromLocalFile(QString::fromStdString(path.string()));
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    REQUIRE(s.saveProject(url).isEmpty());
+    s.edit(QString::fromStdString(s.document().data()["objects"][0]["uuid"]), "/name", "Thrown away");
+    s.autosave();
+    REQUIRE(std::filesystem::exists(sv::autosave_path(path)));
+    s.discardChanges();
+    CHECK_FALSE(std::filesystem::exists(sv::autosave_path(path)));
+    Session t(nullptr);
+    REQUIRE(t.openProject(url).isEmpty());
+    CHECK(t.recovery_file().isEmpty());
 }

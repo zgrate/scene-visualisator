@@ -10,13 +10,25 @@ Rectangle {
     color: Theme.bg
     property string message
     property bool failed: false
+    // Runs an action that replaces the project; Main.qml sets it to its unsaved-changes check.
+    property var guard: action => action()
+    signal problem() // a failed action, so Main can bring this screen up to show the message
 
     function report(error, ok) {
         failed = error !== ""
         message = failed ? error : ok
+        if (failed) problem()
     }
-    function open() { openDialog.open() }
-    function save() { if (Session.filePath) report(Session.saveProject(""), qsTr("Saved")); else saveDialog.open() }
+    function open() { guard(() => openDialog.open()) }
+    function openUrl(url) { guard(() => report(Session.openProject(url), qsTr("Opened"))) }
+    // then: run after a successful save (the unsaved-changes dialog continues with its action).
+    function save(then) {
+        if (!Session.filePath) return saveAs(then)
+        const error = Session.saveProject("")
+        report(error, qsTr("Saved"))
+        if (!error && then) then()
+    }
+    function saveAs(then) { saveDialog.then = then || null; saveDialog.open() }
 
     FileDialog {
         id: openDialog
@@ -28,7 +40,14 @@ Rectangle {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "svproj"
         nameFilters: [qsTr("Scene Visualiser projects (*.svproj)")]
-        onAccepted: screen.report(Session.saveProject(selectedFile), qsTr("Saved"))
+        property var then: null
+        onAccepted: {
+            const error = Session.saveProject(selectedFile)
+            screen.report(error, qsTr("Saved"))
+            if (!error && then) then()
+            then = null
+        }
+        onRejected: then = null
     }
     FileDialog {
         id: gdtfDialog
@@ -210,10 +229,52 @@ Rectangle {
             }
             RowLayout {
                 spacing: 6
-                Button { text: qsTr("New"); onClicked: { Session.newProject(); screen.report("", qsTr("New project")) } }
-                Button { text: qsTr("Open…"); onClicked: openDialog.open() }
+                Button {
+                    text: qsTr("New")
+                    onClicked: screen.guard(() => { Session.newProject(); screen.report("", qsTr("New project")) })
+                }
+                Button { text: qsTr("Open…"); onClicked: screen.open() }
                 Button { text: qsTr("Save"); onClicked: screen.save() }
-                Button { text: qsTr("Save as…"); onClicked: saveDialog.open() }
+                Button { text: qsTr("Save as…"); onClicked: screen.saveAs() }
+            }
+            RowLayout {
+                visible: Session.linkedMedia.length > 0
+                spacing: 6
+                Label {
+                    Layout.fillWidth: true
+                    text: qsTr("Linked, not in the project: %1").arg(Session.linkedMedia.join(", "))
+                    color: Theme.warn
+                    elide: Text.ElideMiddle
+                    font.pixelSize: Theme.small + 1
+                }
+                Button {
+                    text: qsTr("Pack into project")
+                    onClicked: screen.report(Session.packMedia(), qsTr("Media packed; save to keep it"))
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Copies the file into the .svproj so the project opens on another computer")
+                }
+            }
+            Section { text: qsTr("RECENT"); visible: Session.recentFiles.length > 0 }
+            Repeater {
+                model: Session.recentFiles
+                delegate: ItemDelegate {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    padding: 4
+                    contentItem: RowLayout {
+                        spacing: 8
+                        Label { text: modelData.name; color: Theme.fg; font.pixelSize: Theme.small + 2 }
+                        Label {
+                            Layout.fillWidth: true
+                            text: modelData.path
+                            color: Theme.muted
+                            elide: Text.ElideMiddle
+                            font.family: Theme.mono
+                            font.pixelSize: Theme.small
+                        }
+                    }
+                    onClicked: screen.openUrl(modelData.url)
+                }
             }
             Section { text: qsTr("IMPORT") }
             RowLayout {

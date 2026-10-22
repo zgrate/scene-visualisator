@@ -379,3 +379,16 @@ Hard rules:
   `AZURE_SIGNING_ACCOUNT` and `AZURE_CERT_PROFILE`. Every signing step is skipped while its secrets are missing.
 - **Opt-in:** Sparkle and WinSparkle both ask before the first automatic check (NFR-9). Crash uploads are off until
   the ABOUT checkbox is ticked.
+
+## 23. Save, open and recent files
+- **Unsaved changes:** New, Open, Recent, a dropped `.svproj` and closing the window all go through `guarded(action)` in
+  `Main.qml`. When `dirty`, it asks Save / Don't save / Cancel. Save on an untitled project runs Save as first.
+  `Session.discardChanges()` deletes the autosave, so discarded edits are not offered for recovery.
+- **Recent files:** `Session.recentFiles` holds `{path, name, url}`, newest first, at most 10, and lists only files that
+  still exist. It is stored in QSettings `recentFiles` on every successful open and save. The tests point QSettings at a
+  temp folder.
+- **Drop and Finder:** dropping onto the window opens files by extension: `svproj`, `gdtf`, `mvr`, `obj` (metres, Y up),
+  `fbx` and `xml` (Resolume). macOS `QFileOpenEvent` arrives as `Session.openRequested(url)`. Ctrl+Shift+S runs Save as.
+- **Missing files:** `Session.missingFiles` lists fixture types, geometry and media that the project names but cannot
+  find. `projectOpened()` shows them in a dialog. `linkedMedia` lists media linked by absolute path, and `packMedia()`
+  copies it into `media/` as one undo step.

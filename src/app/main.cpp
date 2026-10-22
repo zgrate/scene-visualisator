@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileOpenEvent>
 #include <QGuiApplication>
 #include <QMutex>
 #include <QQmlApplicationEngine>
@@ -39,6 +40,18 @@ class CompositionProvider : public QQuickImageProvider {
             img = sv::render::make_composition(*s->snapshot(), img); // placed by source.fit, as on the walls
         *size = img.size();
         return img;
+    }
+};
+
+// macOS hands Finder double-clicks and Dock drops over as FileOpen events, not arguments. QML opens them after
+// its unsaved-changes check.
+class FileOpenFilter : public QObject {
+  public:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() != QEvent::FileOpen)
+            return QObject::eventFilter(watched, event);
+        Q_EMIT Session::instance()->openRequested(static_cast<QFileOpenEvent *>(event)->url());
+        return true;
     }
 };
 
@@ -116,6 +129,9 @@ int main(int argc, char *argv[]) {
                                                                 {"sweep", sv::proto::Pattern::sweep}};
     if (auto it = patterns.find(args.value(generator)); it != patterns.end())
         session.set_generator(it->second);
+
+    FileOpenFilter file_open;
+    app.installEventFilter(&file_open);
 
     QQmlApplicationEngine engine;
     engine.addImageProvider("composition", new CompositionProvider);

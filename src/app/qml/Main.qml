@@ -42,6 +42,36 @@ ApplicationWindow {
 
     function rate(v) { return v < 0 ? "—" : Math.round(v) + " Hz" }
 
+    // Every action that replaces the project (new, open, recent, drop, close) runs through here, so unsaved edits are
+    // never dropped without asking.
+    function guarded(action) {
+        if (!Session.dirty) return action()
+        unsaved.action = action
+        unsaved.open()
+    }
+    // Files dropped on the window or handed over by the OS: a project opens, anything else is imported.
+    function openFiles(urls) {
+        for (const url of urls) {
+            const name = url.toString().toLowerCase()
+            const ext = name.slice(name.lastIndexOf(".") + 1)
+            if (ext === "svproj") { project.openUrl(url); return }
+            const error = ext === "gdtf" ? Session.importGdtf(url)
+                        : ext === "mvr" ? Session.importMvr(url)
+                        : ext === "obj" ? Session.importObj(url, "m", false, false)
+                        : ext === "fbx" ? Session.importFbx(url)
+                        : ext === "xml" ? Session.importResolume(url)
+                        : qsTr("Cannot open .%1 files by dropping; use the Project screen").arg(ext)
+            project.report(error, qsTr("Imported %1").arg(decodeURIComponent(name.slice(name.lastIndexOf("/") + 1))))
+        }
+    }
+    property bool closeConfirmed: false
+    onClosing: close => {
+        if (Session.dirty && !closeConfirmed) {
+            close.accepted = false
+            guarded(() => { closeConfirmed = true; win.close() })
+        }
+    }
+
     Shortcut { sequences: [StandardKey.Undo]; onActivated: Session.undo() }
     Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; onActivated: Session.redo() }
     Shortcut { sequences: [StandardKey.Delete, "Backspace"]; onActivated: Session.deleteSelection() }
@@ -57,6 +87,7 @@ ApplicationWindow {
     Shortcut { sequence: "PgDown"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, -0.25, 0) }
     Shortcut { sequences: [StandardKey.Open]; onActivated: project.open() }
     Shortcut { sequences: [StandardKey.Save]; onActivated: project.save() }
+    Shortcut { sequences: [StandardKey.SaveAs, "Ctrl+Shift+S"]; onActivated: project.saveAs() }
 
     header: Rectangle {
         height: Theme.titleBar
@@ -263,6 +294,8 @@ ApplicationWindow {
             id: project
             visible: win.screen === "project"
             anchors.fill: parent
+            guard: win.guarded
+            onProblem: win.screen = "project"
         }
 
         PatchScreen {
@@ -284,6 +317,54 @@ ApplicationWindow {
             visible: win.screen === "plan"
             anchors.fill: parent
         }
+    }
+
+    DropArea {
+        anchors.fill: parent
+        onDropped: drop => { if (drop.hasUrls) { drop.accept(Qt.CopyAction); win.openFiles(drop.urls) } }
+    }
+
+    Dialog {
+        id: unsaved
+        property var action: null
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Save changes to “%1”?").arg(Session.projectName)
+        Label {
+            text: qsTr("Your changes are lost if you don't save them.")
+            color: Theme.fg
+        }
+        footer: DialogButtonBox {
+            Button { text: qsTr("Save"); DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+            Button { text: qsTr("Don't save"); DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole }
+            Button { text: qsTr("Cancel"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+            onDiscarded: {
+                unsaved.close()
+                Session.discardChanges()
+                unsaved.action()
+            }
+        }
+        onAccepted: project.save(action)
+    }
+
+    // Opened files whose fixture types, geometry or media are not where the project says.
+    Dialog {
+        id: missing
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Some files were not found")
+        standardButtons: Dialog.Ok
+        Label {
+            width: 460
+            wrapMode: Text.Wrap
+            text: qsTr("These are drawn as placeholders until they are imported again:\n%1")
+                  .arg(Session.missingFiles.join("\n"))
+            color: Theme.fg
+        }
+        function check() { if (Session.missingFiles.length && !opened) open() }
+        Component.onCompleted: check() // a project given on the command line opened before QML existed
     }
 
     // AT-6: an autosave newer than the saved file (or an untitled one) is offered once on launch or open.
@@ -314,5 +395,7 @@ ApplicationWindow {
     Connections {
         target: Session
         function onChanged() { recovery.check() }
+        function onProjectOpened() { missing.check() }
+        function onOpenRequested(url) { win.openFiles([url]) }
     }
 }
