@@ -31,7 +31,8 @@ struct UniverseStatus {
     double rate_hz = 0;        // merged frames per second over the last second
     std::uint64_t lost = 0;    // sequence gaps since subscribe
     std::uint64_t dropped = 0; // out-of-order packets discarded
-    std::vector<std::string> sources;
+    std::vector<std::string> sources;    // display names
+    std::vector<std::string> source_ids; // same order: "artnet:<ip>", "sacn:<cid>", "internal:..."
     std::array<std::uint8_t, 512> winner{}; // index into sources, UniverseMerger::no_winner if none
     MergePolicy policy = MergePolicy::priority;
 };

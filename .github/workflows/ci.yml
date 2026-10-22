@@ -27,7 +27,7 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
-          modules: 'qtshadertools'
+          modules: 'qtshadertools qtsvg'
           aqtversion: '==3.3.*'
           cache: true
 

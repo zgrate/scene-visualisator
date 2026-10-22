@@ -5,6 +5,7 @@
 
 #include <QGuiApplication>
 #include <QMouseEvent>
+#include <cmath>
 #include <map>
 
 namespace {
@@ -19,7 +20,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
         if (s->revision() != revision) {
             revision = s->revision();
             project = s->snapshot();
-            library = &s->library();
+            library = s->library_snapshot();
             selection = s->selection();
             scene.set_composition(s->composition());
             buffers.clear();
@@ -50,7 +51,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
     sv::render::SceneRenderer scene;
     quint64 revision = ~0ull;
     std::shared_ptr<const sv::json> project;
-    const sv::render::FixtureLibrary *library = nullptr;
+    std::shared_ptr<const sv::render::FixtureLibrary> library;
     std::set<std::string> selection;
     std::map<std::uint16_t, sv::proto::TripleBuffer<sv::proto::UniverseFrame> *> buffers;
     double time = 0;
@@ -70,9 +71,39 @@ ViewportItem::ViewportItem(QQuickItem *parent) : QQuickRhiItem(parent) {
 
 QQuickRhiItemRenderer *ViewportItem::createRenderer() { return new ViewportRenderer; }
 
+std::optional<QVector3D> ViewportItem::on_plane(QPointF p, float y) const {
+    const auto [origin, dir] = camera.ray(float(p.x() / width()), float(p.y() / height()), float(width() / height()));
+    if (std::abs(dir.y()) < 1e-4f)
+        return std::nullopt;
+    const float t = (y - origin.y()) / dir.y();
+    return t > 0 ? std::optional(origin + dir * t) : std::nullopt;
+}
+
+namespace {
+std::optional<std::string> pick_at(const sv::render::OrbitCamera &camera, QPointF p, QSizeF size) {
+    Session *s = Session::instance();
+    const auto [origin, dir] = camera.ray(float(p.x() / size.width()), float(p.y() / size.height()),
+                                          float(size.width() / size.height()));
+    const auto blank = [](std::uint16_t) { return std::span<const std::uint8_t>(); };
+    const auto fixtures = sv::render::decode_fixtures(*s->snapshot(), s->library(), blank);
+    return sv::render::pick(sv::render::build_scene(*s->snapshot(), fixtures, {}, 0), origin, dir);
+}
+} // namespace
+
 void ViewportItem::mousePressEvent(QMouseEvent *e) {
     last = press = e->position();
     dragged = false;
+    grab.reset();
+    Session *s = Session::instance();
+    if (e->button() == Qt::LeftButton && !(e->modifiers() & Qt::ShiftModifier))
+        if (auto hit = pick_at(camera, press, size()); hit && s->selection().contains(*hit))
+            for (const sv::json &o : s->document().data().at("objects"))
+                if (o.value("uuid", std::string()) == *hit) {
+                    const auto &v = o.at("position");
+                    const QVector3D pos(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
+                    if (const auto at = on_plane(press, pos.y()))
+                        grab = Grab{*hit, pos, *at - pos};
+                }
     e->accept();
 }
 
@@ -80,23 +111,70 @@ void ViewportItem::mouseMoveEvent(QMouseEvent *e) {
     const QPointF d = e->position() - last;
     last = e->position();
     dragged |= (e->position() - press).manhattanLength() > 4;
-    if (e->buttons() & Qt::MiddleButton || e->modifiers() & Qt::ShiftModifier)
+    if (grab) {
+        if (!dragged)
+            return;
+        if (const auto at = on_plane(e->position(), grab->start.y())) {
+            QVector3D p = *at - grab->offset;
+            if (!(e->modifiers() & Qt::AltModifier))
+                p = QVector3D(std::round(p.x() * 4) / 4, p.y(), std::round(p.z() * 4) / 4);
+            Session::instance()->preview_move(grab->uuid, p);
+        }
+    } else if (e->buttons() & Qt::MiddleButton || e->modifiers() & Qt::ShiftModifier)
         camera.pan(float(d.x() / height()), float(d.y() / height()));
-    else
+    else {
         camera.orbit(float(-d.x() * 0.3), float(d.y() * 0.3));
+        if (view_ != "Perspective")
+            view_ = QStringLiteral("Perspective"), Q_EMIT viewChanged();
+    }
     update();
 }
 
 void ViewportItem::mouseReleaseEvent(QMouseEvent *e) {
+    Session *s = Session::instance();
+    if (grab && dragged) {
+        s->commit_move();
+        grab.reset();
+        return;
+    }
+    grab.reset();
     if (dragged || e->button() != Qt::LeftButton)
         return;
-    Session *s = Session::instance();
-    const auto [origin, dir] =
-        camera.ray(float(e->position().x() / width()), float(e->position().y() / height()), float(width() / height()));
-    const auto blank = [](std::uint16_t) { return std::span<const std::uint8_t>(); };
-    const auto fixtures = sv::render::decode_fixtures(*s->snapshot(), s->library(), blank);
-    s->select(sv::render::pick(sv::render::build_scene(*s->snapshot(), fixtures, {}, 0), origin, dir),
-              e->modifiers() & Qt::ControlModifier);
+    s->select(pick_at(camera, e->position(), size()), e->modifiers() & Qt::ControlModifier);
+}
+
+void ViewportItem::setPreset(const QString &name) {
+    using P = sv::render::OrbitCamera::Preset;
+    static const std::map<QString, P> presets{
+        {"Perspective", P::perspective}, {"Top", P::top}, {"Front", P::front}, {"Side", P::side}};
+    if (const auto it = presets.find(name); it != presets.end()) {
+        camera.set_preset(it->second);
+        view_ = name;
+        Q_EMIT viewChanged();
+        update();
+    }
+}
+
+QVariantMap ViewportItem::cameraState() const {
+    return {{"target", QVariantList{camera.target.x(), camera.target.y(), camera.target.z()}},
+            {"yaw", camera.yaw},
+            {"pitch", camera.pitch},
+            {"distance", camera.distance},
+            {"fov", camera.fov},
+            {"view", view_}};
+}
+
+void ViewportItem::setCameraState(const QVariantMap &state) {
+    const QVariantList t = state.value("target").toList();
+    if (t.size() == 3)
+        camera.target = QVector3D(t[0].toFloat(), t[1].toFloat(), t[2].toFloat());
+    camera.yaw = state.value("yaw", camera.yaw).toFloat();
+    camera.pitch = state.value("pitch", camera.pitch).toFloat();
+    camera.distance = state.value("distance", camera.distance).toFloat();
+    camera.fov = state.value("fov", camera.fov).toFloat();
+    view_ = state.value("view", view_).toString();
+    Q_EMIT viewChanged();
+    update();
 }
 
 void ViewportItem::wheelEvent(QWheelEvent *e) {

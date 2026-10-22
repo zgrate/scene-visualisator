@@ -15,3 +15,12 @@ else()
     add_test(NAME render_golden COMMAND sv_render_golden ${PROJECT_SOURCE_DIR}/tests/golden/demo.png --no-compare)
 endif()
 set_property(TEST render_golden PROPERTY SKIP_RETURN_CODE 77)
+
+# Session (the QML-facing edit API) built straight from the app sources, under an offscreen QGuiApplication.
+add_executable(sv_session_tests session_tests.cpp ${PROJECT_SOURCE_DIR}/src/app/session.cpp ${PROJECT_SOURCE_DIR}/src/app/session.h)
+set_target_properties(sv_session_tests PROPERTIES AUTOMOC ON)
+target_include_directories(sv_session_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/app)
+file(GLOB sv_test_gdtf CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/resources/gdtf/*.gdtf)
+qt_add_resources(sv_session_tests "test_gdtf" PREFIX "/gdtf" BASE ${PROJECT_SOURCE_DIR}/resources/gdtf FILES ${sv_test_gdtf})
+target_link_libraries(sv_session_tests PRIVATE Catch2::Catch2 sv_render sv_proto Qt6::Qml)
+catch_discover_tests(sv_session_tests)

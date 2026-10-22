@@ -87,9 +87,11 @@ Hard rules:
   positions persist in the project's `layout`.
 - **Dock:** a bottom dock holds the 512-bar universe meter. It is a C++ `QQuickItem` with one geometry node, never a
   Repeater.
-- **Title bar:** the project name, the tabs Design/Plan/Patch/Mapping, and the Art-Net/sACN status.
-- **Colours:** use the `Theme` QML singleton only. Components contain no colour literals. Use the Fusion style with the
-  palette set in `main.cpp`.
+- **Title bar:** the project name (• when unsaved), the tabs Design/Patch/DMX (Plan and Mapping are Beta), and the
+  Art-Net/sACN status.
+- **Colours:** use the `Theme` QML singleton only (`src/app/qml/Theme.qml`). Components contain no colour literals.
+  Fusion style; its palette is set from Theme tokens in `Main.qml` (`QGuiApplication::setPalette` does not reach Quick
+  Controls here).
 
 | Token | Value | Token | Value |
 |---|---|---|---|
@@ -103,8 +105,10 @@ Hard rules:
 - **Cards:** a 1 px `line` border, radius 8, and a soft dark shadow.
 - **Type:** monospace for numbers, system sans for labels, and 8 px uppercase tracked section headers.
 - **Selection:** uses the accent colour.
-- **Keyboard:** Ctrl (Cmd on macOS) with Z or Shift+Z for undo and redo. Delete removes the selection, and arrows nudge
-  it.
+- **Keyboard:** Ctrl (Cmd on macOS) with Z or Shift+Z for undo and redo, D duplicates, O/S open and save. Delete
+  removes the selection, arrows nudge it 0.25 m (Page Up/Down for height), Escape clears it.
+- **Viewport mouse:** left drag orbits, middle or Shift drag pans, wheel zooms, click selects (Ctrl adds). Left drag on a
+  selected object moves it on its height plane, snapped to 0.25 m (Alt: free).
 
 ## 7. Agent tooling
 - **Skills** (qt-development-skills plugin): use `/qt-cmake-project` for CMake and `/qt-qml` for QML. Use
@@ -192,3 +196,24 @@ Hard rules:
   copies whatever changed, keyed on `Session::revision()`. `render()` pulls the TripleBuffers and rebuilds the scene.
 - **Picking:** CPU only. `pick(scene, ray)` tests unit-cube pick boxes, and `OrbitCamera::ray` gives the ray for a
   viewport point.
+
+## 14. App and QML API in brief (M5)
+- **`Session` is the only QML entry point** (singleton, `import SceneVisualiser`). Properties: `objects`, `current`
+  (first selected object as JSON plus derived `footprint`, `patchText`, `overflow`, `resolution`), `selectionCount`,
+  `fixtureTypes`, `universes`, `layout`, `canUndo`/`canRedo`, `projectName`, `filePath`, `dirty`, and `dmxStatus`
+  (refreshed at 20 Hz). All notify through `changed()` except `dmxStatus` (`dmxChanged()`).
+- **Edits:** `edit(uuid, pointer, value)` sets one field by JSON pointer relative to the object (`"/position/1"`). It
+  uses `replace` for existing paths because JSON-patch `add` inserts into arrays. Doubles from QML become integers
+  where the stored field is an integer. Other actions: `setFixtureType`, `setPatch("u.aaa")`, `addFixture/Wall/Truss`
+  (next free fixture ID and address), `duplicateSelection`, `deleteSelection`, `nudgeSelection`, `undo`, `redo`.
+- **Layout state:** `setLayout(key, value)` writes `layout` (card positions under `cards.<key>`, `cameraBookmarks`)
+  outside the undo history via `Document::layout()`.
+- **Files:** `newProject`, `openProject(url)`, `saveProject(url or "")`, `importGdtf(url)` return an error string,
+  empty on success. Saved packages carry `gdtf/<file>` for every type the rig uses; other entries round-trip as is.
+  The app takes an optional `.svproj` path argument and opens the demo rig without one.
+- **Render-thread rule:** the render thread only sees `snapshot()` and `library_snapshot()`, both immutable and replaced
+  on change. A viewport drag calls `preview_move` (snapshot only) and `commit_move` (one undo step) on release.
+- **Singleton gotcha:** `Session(QObject *parent)` has no default argument on purpose. If it is default-constructible,
+  QML builds its own instance instead of calling `create()`.
+- **Tests:** `sv_session_tests` compiles `session.cpp` directly and runs offscreen. UI checks use `tools/screenshot.sh`
+  or `xdotool` under `xvfb-run`; with no window manager there, the window is never active, so `Shortcut`s do not fire.

@@ -95,9 +95,9 @@ struct DmxEngine::Impl {
         st.data = merged.data;
         st.winner = merged.winner;
         st.policy = uni.merger.policy();
-        st.sources.clear();
+        st.sources.clear(), st.source_ids.clear();
         for (auto &s : uni.merger.sources())
-            st.sources.push_back(s.name);
+            st.sources.push_back(s.name), st.source_ids.push_back(s.id);
         st.rate_hz = uni.rate_hz, st.lost = uni.lost, st.dropped = uni.dropped;
     }
 

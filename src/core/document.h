@@ -12,6 +12,8 @@ class Document {
     explicit Document(json data = new_project()) : data_(std::move(data)) {}
 
     const json &data() const { return data_; }
+    // UI state (card positions, camera bookmarks) saved with the project but outside the undo history.
+    json &layout() { return data_["layout"]; }
 
     // Applies an RFC 6902 patch as one undoable step. Throws (leaving the document unchanged) if it does not apply.
     void apply(const json &patch, std::string label);

@@ -25,11 +25,17 @@ int main(int argc, char *argv[]) {
     QCommandLineOption generator("generator", "Run an internal test pattern: off, full, chase, rainbow, sweep.",
                                  "pattern", "off");
     args.addOption(generator);
+    args.addPositionalArgument("project", "A .svproj file to open; the demo rig when omitted.");
     args.process(app);
 
-    Session session;
-    // shortcut: always opens the demo rig until File > Open lands (M5).
-    session.set_project(sv::demo_project());
+    Session session(nullptr);
+    if (args.positionalArguments().isEmpty())
+        session.set_project(sv::demo_project(), QStringLiteral("Demo rig"));
+    else if (const QString error = session.openProject(QUrl::fromLocalFile(args.positionalArguments().first()));
+             !error.isEmpty()) {
+        qCritical().noquote() << error;
+        return 1;
+    }
     session.start_dmx();
     static const std::map<QString, sv::proto::Pattern> patterns{{"off", sv::proto::Pattern::off},
                                                                 {"full", sv::proto::Pattern::full},

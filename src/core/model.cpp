@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <random>
 
 namespace sv {
@@ -103,9 +104,10 @@ json demo_project() {
     truss("Front truss", 1.5);
     truss("Back truss", -2.5);
     int address = 1, id = 101;
+    std::map<std::string, int> count; // "Spot 1", "Spot 2", ...
     // Footprints of the bundled generic types (resources/gdtf), all in mode "Default".
     auto put = [&](const char *gdtf, const char *name, int footprint, double x, double y, double z, double tilt) {
-        json f = new_fixture(name, gdtf, "Default");
+        json f = new_fixture(std::string(name) + " " + std::to_string(++count[name]), gdtf, "Default");
         f["position"] = {std::round(x * 100) / 100, y, z};
         f["rotation"] = {tilt, 0.0, 0.0};
         f["fixtureId"] = id++;
