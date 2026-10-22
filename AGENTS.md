@@ -90,12 +90,13 @@ Hard rules:
   positions persist in the project's `layout`.
 - **Dock:** a bottom dock holds the 512-bar universe meter. It is a C++ `QQuickItem` with one geometry node, never a
   Repeater. The patch sheet reuses it with `occupancy: true`.
-- **Screens:** Patch sheet (`PatchScreen.qml`), DMX monitor (`DmxScreen.qml`, grid is the C++ `ChannelGrid`) Mapping
-  (`MappingScreen.qml`) and Project (`ProjectScreen.qml`) cover the viewport, which keeps running underneath. `--screen patch|dmx|mapping|project` starts on one,
+- **Screens:** Patch sheet (`PatchScreen.qml`), DMX monitor (`DmxScreen.qml`, grid is the C++ `ChannelGrid`) Plan
+  (`PlanScreen.qml`), Mapping (`MappingScreen.qml`) and Project (`ProjectScreen.qml`) cover the viewport, which keeps
+  running underneath. `--screen patch|dmx|plan|mapping|project` starts on one,
   which is how screenshots of them are taken.
 - **Controls:** use `Input` and `Check` (Studio-styled TextField and CheckBox) for free-standing fields; stock Fusion
   ones vanish on dark panels. Inspector rows use `Field`.
-- **Title bar:** the project name (• when unsaved), the tabs Design/Patch/DMX/Mapping, and the
+- **Title bar:** the project name (• when unsaved), the tabs Design/Patch/DMX/Plan/Mapping, and the
   Art-Net/sACN status.
 - **Colours:** use the `Theme` QML singleton only (`src/app/qml/Theme.qml`). Components contain no colour literals.
   Fusion style; its palette is set from Theme tokens in `Main.qml` (`QGuiApplication::setPalette` does not reach Quick
@@ -314,3 +315,17 @@ Hard rules:
   `/tmp/sv_session_tests/` and asserts names, metres, Z-up in Blender and the camera direction. CI runs it with
   apt's Blender; locally use a `pip install bpy` venv.
 
+
+## 20. Plan and elevation drawings (B6)
+- **`render/drawing_painter.h`:** `paint_drawing(painter, project, library, meshes, sheet)` paints a whole sheet in
+  page millimetres from `build_scene` at rest: box hulls, walls (a line in plan), fixture symbols by type name (spot,
+  wash, beam, blinder, pixel), automatic dimensions (overall stage, fixture rows, truss trims above the deck top in
+  elevations), manual dimensions and the title block. It returns drawing metres → page mm. `drawing_point(kind, p)`:
+  plan `(x, z)`, front `(x, -y)`, side `(-z, -y)`.
+- **Stored sheets:** `project["drawings"]`, one `{uuid, kind, sheet, scale, title, hiddenLayers, dimensions}` per
+  kind, created on first edit. `Session.drawing(kind)`, `setDrawing(kind, key, value)` (one undo step),
+  `exportDrawing(kind, url)` (PDF via `QPdfWriter`, SVG via `QSvgGenerator`, by suffix). QtSvg is LGPL-3.0.
+- **UI:** `DrawingItem` (QQuickPaintedItem) on `PlanScreen.qml`; Shift-drag adds a dimension snapped to 5 cm.
+  Drawings are paper white with fixed ink colours on purpose; the Theme rule covers the app chrome, not the sheet.
+- **Goldens:** `tests/golden/plan.png` and `front.png` are rendered without lettering (`sheet.text = false`) by
+  `sv_session_tests`; regenerate with `SV_UPDATE_GOLDEN=1`.

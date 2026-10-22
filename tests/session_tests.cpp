@@ -5,6 +5,8 @@
 
 #include <QEventLoop>
 #include <QGuiApplication>
+#include <QPainter>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTimer>
 #include <catch2/catch_approx.hpp>
@@ -409,4 +411,88 @@ TEST_CASE("Session exports FBX and imports it back as set pieces under groups, o
     t.undo();
     CHECK(t.document().data()["objects"].empty());
     CHECK(t.importFbx(QUrl::fromLocalFile("/nonexistent.fbx")).size() > 0);
+}
+
+namespace {
+// Plan and front elevation of the demo rig without lettering, against tests/golden/<kind>.png (FR-19).
+// SV_UPDATE_GOLDEN=1 or a missing golden rewrites it.
+void check_drawing_golden(Session &s, const QString &kind) {
+    sv::render::DrawingSheet sheet = s.drawing_sheet(kind);
+    sheet.text = false;
+    const QSizeF mm = sv::render::sheet_size_mm(sheet);
+    QImage actual(QSize(int(mm.width() * 2), int(mm.height() * 2)), QImage::Format_RGBA8888);
+    actual.fill(Qt::black);
+    QPainter p(&actual);
+    p.scale(2, 2);
+    sv::render::paint_drawing(p, s.document().data(), *s.library_snapshot(), *s.meshes(), sheet);
+    p.end();
+    const QString golden = QStringLiteral(SV_SOURCE_DIR "/tests/golden/%1.png").arg(kind);
+    if (qEnvironmentVariableIntValue("SV_UPDATE_GOLDEN") || !QFile::exists(golden)) {
+        REQUIRE(actual.save(golden));
+        return;
+    }
+    const QImage expected = QImage(golden).convertToFormat(QImage::Format_RGBA8888);
+    REQUIRE(expected.size() == actual.size());
+    long bad = 0;
+    for (int y = 0; y < actual.height(); ++y) {
+        const uchar *a = actual.constScanLine(y), *e = expected.constScanLine(y);
+        for (int x = 0; x < actual.width() * 4; x += 4)
+            bad += std::max({std::abs(a[x] - e[x]), std::abs(a[x + 1] - e[x + 1]), std::abs(a[x + 2] - e[x + 2])}) > 48;
+    }
+    INFO(kind.toStdString() << " pixels off: " << bad);
+    CHECK(bad < actual.width() * actual.height() / 500);
+}
+} // namespace
+
+TEST_CASE("Session drawings: sheet settings are one undo step, plan and front match their goldens (FR-19)") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    CHECK(s.drawing("front").value("kind").toString() == "front");
+    CHECK_FALSE(s.document().data().contains("drawings"));
+
+    s.setDrawing("front", "scale", 100.0);
+    s.setDrawing("plan", "sheet", "A4");
+    const json &drawings = s.document().data().at("drawings");
+    REQUIRE(drawings.size() == 2);
+    CHECK(drawings[0]["scale"] == 100);
+    CHECK(drawings[0]["scale"].is_number_integer());
+    CHECK(s.drawing_sheet("plan").paper == "A4");
+    s.undo();
+    CHECK(s.drawing_sheet("plan").paper == "A3");
+    s.undo();
+    CHECK_FALSE(s.document().data().contains("drawings"));
+
+    check_drawing_golden(s, "plan");
+    check_drawing_golden(s, "front");
+}
+
+TEST_CASE("Session exports drawings to a one-page A3 landscape PDF and to SVG (FR-19)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    s.setDrawing("front", "dimensions",
+                 QVariantList{QVariantMap{{"a", QVariantList{-4, -6}}, {"b", QVariantList{4, -6}}}});
+
+    const QString pdf = QString::fromStdString((dir / "front.pdf").string());
+    REQUIRE(s.exportDrawing("front", QUrl::fromLocalFile(pdf)).isEmpty());
+    QFile f(pdf);
+    REQUIRE(f.open(QIODevice::ReadOnly));
+    const QString text = QString::fromLatin1(f.readAll());
+    CHECK(text.startsWith("%PDF"));
+    CHECK(text.count(QRegularExpression("/Type\\s*/Page\\b")) == 1);
+    const QRegularExpressionMatch box =
+        QRegularExpression("/MediaBox\\s*\\[\\s*0\\s+0\\s+([\\d.]+)\\s+([\\d.]+)").match(text);
+    REQUIRE(box.hasMatch());
+    CHECK(box.captured(1).toDouble() == Catch::Approx(1190.55).margin(1)); // 420 mm in points
+    CHECK(box.captured(2).toDouble() == Catch::Approx(841.89).margin(1));  // 297 mm
+
+    const QString svg = QString::fromStdString((dir / "plan.svg").string());
+    REQUIRE(s.exportDrawing("plan", QUrl::fromLocalFile(svg)).isEmpty());
+    QFile g(svg);
+    REQUIRE(g.open(QIODevice::ReadOnly));
+    const QByteArray xml = g.readAll();
+    CHECK(xml.contains("<svg"));
+    CHECK(xml.contains("viewBox=\"0 0 420 297\""));
+    CHECK(s.exportDrawing("plan", QUrl::fromLocalFile("/nonexistent/dir/x.pdf")).size() > 0);
 }

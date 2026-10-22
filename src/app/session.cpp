@@ -4,6 +4,7 @@
 #include "core/interchange.h"
 #include "core/mvr.h"
 #include "core/resolume.h"
+#include "render/drawing_painter.h"
 #include "render/test_pattern.h"
 
 #include <QDir>
@@ -13,9 +14,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QPdfWriter>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QSvgGenerator>
 #include <algorithm>
 #include <climits>
 #include <ranges>
@@ -1216,4 +1219,93 @@ void Session::discardRecovery() {
     std::filesystem::remove(recovery_.toStdU16String(), ec);
     recovery_.clear();
     Q_EMIT changed();
+}
+
+namespace {
+json drawing_of(const json &project, const std::string &kind, int *index = nullptr) {
+    if (index)
+        *index = -1;
+    if (project.contains("drawings") && project["drawings"].is_array())
+        for (std::size_t i = 0; i < project["drawings"].size(); ++i) {
+            const json &d = project["drawings"][i];
+            if (d.is_object() && d.value("kind", std::string()) == kind) {
+                if (index)
+                    *index = int(i);
+                return d;
+            }
+        }
+    return {{"uuid", sv::new_uuid()},
+            {"kind", kind},
+            {"sheet", "A3"},
+            {"scale", 0},
+            {"title", std::string()},
+            {"hiddenLayers", json::array()},
+            {"dimensions", json::array()}};
+}
+} // namespace
+
+QVariantMap Session::drawing(const QString &kind) const {
+    return to_variant(drawing_of(document_.data(), kind.toStdString())).toMap();
+}
+
+void Session::setDrawing(const QString &kind, const QString &key, const QVariant &value) {
+    int index = -1;
+    json d = drawing_of(document_.data(), kind.toStdString(), &index);
+    json v = from_variant(value);
+    if (d.contains(key.toStdString()) && d[key.toStdString()].is_number_integer() && v.is_number())
+        v = std::llround(v.get<double>());
+    if (d.value(key.toStdString(), json()) == v)
+        return;
+    d[key.toStdString()] = std::move(v);
+    const bool list = document_.data().contains("drawings") && document_.data()["drawings"].is_array();
+    if (!list)
+        apply(json::array({{{"op", "add"}, {"path", "/drawings"}, {"value", json::array({d})}}}), "Edit drawing");
+    else
+        apply(json::array({{{"op", index < 0 ? "add" : "replace"},
+                            {"path", "/drawings/" + (index < 0 ? std::string("-") : std::to_string(index))},
+                            {"value", d}}}),
+              "Edit drawing");
+}
+
+sv::render::DrawingSheet Session::drawing_sheet(const QString &kind) const {
+    sv::render::DrawingSheet sheet = sv::render::sheet_from_json(drawing_of(document_.data(), kind.toStdString()));
+    sheet.project_name = name_.toStdString();
+    return sheet;
+}
+
+QString Session::exportDrawing(const QString &kind, const QUrl &url) {
+    const sv::render::DrawingSheet sheet = drawing_sheet(kind);
+    const QSizeF mm = sv::render::sheet_size_mm(sheet);
+    const QString path = url.toLocalFile();
+    QPainter p;
+    std::unique_ptr<QPaintDevice> device;
+    if (path.endsWith(QStringLiteral(".svg"), Qt::CaseInsensitive)) {
+        auto svg = std::make_unique<QSvgGenerator>();
+        svg->setFileName(path);
+        svg->setSize(QSize(int(mm.width() * 10), int(mm.height() * 10))); // tenths of a mm at 254 dpi
+        svg->setResolution(254);
+        svg->setViewBox(QRectF(QPointF(), mm)); // user units are page millimetres
+        svg->setTitle(name_);
+        device = std::move(svg);
+        if (!p.begin(device.get()))
+            return tr("Cannot write %1").arg(path);
+    } else {
+        auto pdf = std::make_unique<QPdfWriter>(path);
+        pdf->setPageSize(QPageSize(sheet.paper == "A4" ? QPageSize::A4 : QPageSize::A3));
+        pdf->setPageOrientation(QPageLayout::Landscape);
+        pdf->setPageMargins({}, QPageLayout::Millimeter);
+        pdf->setResolution(1200);
+        pdf->setTitle(name_);
+        device = std::move(pdf);
+        if (!p.begin(device.get()))
+            return tr("Cannot write %1").arg(path);
+        p.scale(1200 / 25.4, 1200 / 25.4); // page millimetres
+    }
+    sv::render::paint_drawing(p, document_.data(), library_, *meshes_, sheet);
+    return p.end() ? QString() : tr("Cannot write %1").arg(path);
+}
+
+QVariantList Session::list_of(const char *key) const {
+    const json &p = document_.data();
+    return p.contains(key) && p[key].is_array() ? to_variant(p[key]).toList() : QVariantList();
 }

@@ -11,7 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 include(cmake/deps.cmake)
 
-find_package(Qt6 6.12 REQUIRED COMPONENTS Gui GuiPrivate Quick QuickControls2 ShaderTools Multimedia)
+find_package(Qt6 6.12 REQUIRED COMPONENTS Gui GuiPrivate Quick QuickControls2 ShaderTools Multimedia Svg)
 qt_standard_project_setup(REQUIRES 6.12)
 # Our structs use `slots` (DMX slots, wheel slots); use Q_SIGNALS/Q_SLOTS/Q_EMIT in Qt code.
 add_compile_definitions(QT_NO_KEYWORDS)

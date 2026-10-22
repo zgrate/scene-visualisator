@@ -1,6 +1,7 @@
 # QRhi renderer. The only library allowed to use Qt (Gui + RHI), never Quick/QML.
 add_library(sv_render STATIC
     camera.cpp camera.h
+    drawing_painter.cpp drawing_painter.h
     scene_builder.cpp scene_builder.h
     scene_renderer.cpp scene_renderer.h
     test_pattern.cpp test_pattern.h)

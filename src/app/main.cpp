@@ -90,7 +90,8 @@ int main(int argc, char *argv[]) {
     QCommandLineOption generator("generator", "Run an internal test pattern: off, full, chase, rainbow, sweep.",
                                  "pattern", "off");
     args.addOption(generator);
-    QCommandLineOption screen("screen", "Start on a screen: design, patch, dmx, mapping, project.", "name", "design");
+    QCommandLineOption screen("screen", "Start on a screen: design, patch, dmx, plan, mapping, project.", "name",
+                              "design");
     args.addOption(screen);
     args.addPositionalArgument("project", "A .svproj file to open; the demo rig when omitted.");
     args.process(app);

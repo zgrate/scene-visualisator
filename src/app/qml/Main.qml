@@ -72,7 +72,7 @@ ApplicationWindow {
                 font.pixelSize: Theme.fontSize
             }
             Repeater {
-                model: [["design", qsTr("Design")], ["patch", qsTr("Patch")], ["dmx", qsTr("DMX")], ["mapping", qsTr("Mapping")]]
+                model: [["design", qsTr("Design")], ["patch", qsTr("Patch")], ["dmx", qsTr("DMX")], ["plan", qsTr("Plan")], ["mapping", qsTr("Mapping")]]
                 Label {
                     required property var modelData
                     text: modelData[1]
@@ -169,7 +169,7 @@ ApplicationWindow {
             spacing: 6
             Repeater {
                 model: [["design", qsTr("Design")], ["patch", qsTr("Patch sheet")], ["dmx", qsTr("DMX monitor")],
-                        ["mapping", qsTr("Mapping")], ["project", qsTr("Project")]]
+                        ["plan", qsTr("Plan and elevation")], ["mapping", qsTr("Mapping")], ["project", qsTr("Project")]]
                 RailButton {
                     required property var modelData
                     text: modelData[1]
@@ -277,6 +277,11 @@ ApplicationWindow {
 
         MappingScreen {
             visible: win.screen === "mapping"
+            anchors.fill: parent
+        }
+
+        PlanScreen {
+            visible: win.screen === "plan"
             anchors.fill: parent
         }
     }

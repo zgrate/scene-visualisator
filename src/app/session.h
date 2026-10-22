@@ -5,6 +5,7 @@
 #include "core/project_file.h"
 #include "media/media_source.h"
 #include "protocol/dmx_engine.h"
+#include "render/drawing_painter.h"
 #include "render/scene_builder.h"
 
 #include <QImage>
@@ -46,6 +47,8 @@ class Session : public QObject {
     Q_PROPERTY(int conflictCount READ conflict_count NOTIFY changed)   // fixtures overlapping another
     Q_PROPERTY(QString recoveryFile READ recovery_file NOTIFY changed) // newer autosave to offer, or empty
     Q_PROPERTY(QVariantList outputs READ outputs NOTIFY changed)       // Arena screens and Lumiverses (B3)
+    Q_PROPERTY(QVariantList layers READ layers NOTIFY changed)         // project["layers"]
+    Q_PROPERTY(QVariantList drawings READ drawings NOTIFY changed)     // project["drawings"] (B6)
     Q_PROPERTY(QVariantMap compositionInfo READ composition_info NOTIFY changed)   // project["composition"]
     Q_PROPERTY(QStringList resolumeWarnings READ resolume_warnings NOTIFY changed) // from the last import
     // Composition source state (FR-13): {kind, width, height, fps, signal, error}, refreshed with dmxStatus.
@@ -65,6 +68,7 @@ class Session : public QObject {
     std::shared_ptr<const sv::render::FixtureLibrary> library_snapshot() const { return library_snapshot_; }
     // Set-piece meshes from the package's geometry/*.obj, immutable and replaced when geometry is added.
     std::shared_ptr<const sv::render::MeshLibrary> meshes() const { return meshes_; }
+    sv::render::DrawingSheet drawing_sheet(const QString &kind) const;
     sv::proto::DmxEngine &dmx() { return dmx_; }
     const QImage &composition() const { return composition_; }
     const sv::media::MediaSource &media() const { return media_; } // latest() is safe on the render thread
@@ -155,6 +159,12 @@ class Session : public QObject {
     // FR-25: one set piece per FBX mesh node and a group per empty node, hierarchy and transforms kept, in one
     // undo step. Units and axes are converted by the reader.
     Q_INVOKABLE QString importFbx(const QUrl &url);
+    // FR-19 drawings (B6): project["drawings"] entry for a kind (plan, front, side), created on first edit.
+    Q_INVOKABLE QVariantMap drawing(const QString &kind) const;
+    QVariantList layers() const { return list_of("layers"); }
+    QVariantList drawings() const { return list_of("drawings"); }
+    Q_INVOKABLE void setDrawing(const QString &kind, const QString &key, const QVariant &value); // one undo step
+    Q_INVOKABLE QString exportDrawing(const QString &kind, const QUrl &url); // .pdf or .svg by suffix
     // FR-22: merges an MVR scene in one undo step; objects whose UUID already exists get a new one.
     Q_INVOKABLE QString importMvr(const QUrl &url);
     // FR-23: {header, rows (first 8), mapping {field: column}, fields, error} for the CSV mapping dialog.
@@ -176,6 +186,7 @@ class Session : public QObject {
     void add_object(sv::json object, const char *label);
     void add_gdtf(const std::string &name, std::vector<std::uint8_t> bytes); // throws on a bad file
     void rebuild_meshes();
+    QVariantList list_of(const char *key) const; // a top-level array of the project, empty when missing
     // Copies a geometry file into the package as geometry/<name>; a different file with that name gets "-2" etc.
     std::string store_geometry(const QFileInfo &info, const QByteArray &bytes);
     void update_media(); // opens or reconfigures media_ when composition.source changed
