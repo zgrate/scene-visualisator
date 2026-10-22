@@ -29,6 +29,14 @@ Rectangle {
         target: Session
         function onChanged() { screen.reload++ }
     }
+    // shortcut: a live source refreshes the preview at 4 Hz through the image provider; sample the render thread's
+    // texture in a QQuickRhiItem when mapping needs full-rate video.
+    Timer {
+        interval: 250
+        repeat: true
+        running: screen.visible && Session.mediaStatus.live
+        onTriggered: screen.reload++
+    }
     readonly property bool typing: Window.activeFocusItem instanceof TextInput
     Shortcut { sequence: "Left"; enabled: screen.visible && !screen.typing; onActivated: screen.nudge(-1, 0) }
     Shortcut { sequence: "Right"; enabled: screen.visible && !screen.typing; onActivated: screen.nudge(1, 0) }

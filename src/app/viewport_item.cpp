@@ -1,6 +1,7 @@
 #include "viewport_item.h"
 
 #include "render/scene_renderer.h"
+#include "render/test_pattern.h"
 #include "session.h"
 
 #include <QGuiApplication>
@@ -24,6 +25,8 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
             meshes = s->meshes();
             selection = s->selection();
             scene.set_composition(s->composition());
+            composition_size = s->composition().size();
+            media_serial = 0; // a live source's current frame goes back over the redrawn composition
             buffers.clear();
             for (const QVariant &u : s->universes()) // every universe a fixture or strip reads
                 buffers.try_emplace(std::uint16_t(u.toInt()), s->dmx().frames(std::uint16_t(u.toInt())));
@@ -32,6 +35,12 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
     }
 
     void render(QRhiCommandBuffer *cb) override {
+        if (QImage frame = Session::instance()->media().latest(media_serial); !frame.isNull())
+            // Placed by source.fit unless it already matches the composition. shortcut: a CPU blit per frame;
+            // scale in the wall shader when 4K sources make it show up in profiles (NFR-2).
+            scene.set_composition(project && frame.size() != composition_size
+                                      ? sv::render::make_composition(*project, frame)
+                                      : std::move(frame));
         if (project) {
             for (auto &[u, b] : buffers)
                 b->update();
@@ -48,6 +57,8 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
 
     sv::render::SceneRenderer scene;
     quint64 revision = ~0ull;
+    quint64 media_serial = 0;
+    QSize composition_size;
     std::shared_ptr<const sv::json> project;
     std::shared_ptr<const sv::render::FixtureLibrary> library;
     std::shared_ptr<const sv::render::MeshLibrary> meshes;

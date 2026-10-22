@@ -3,11 +3,13 @@
 // thread; the render thread reads it only from ViewportItem's synchronize(), while the GUI thread is blocked.
 #include "core/document.h"
 #include "core/project_file.h"
+#include "media/media_source.h"
 #include "protocol/dmx_engine.h"
 #include "render/scene_builder.h"
 
 #include <QImage>
 #include <QObject>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
@@ -46,6 +48,8 @@ class Session : public QObject {
     Q_PROPERTY(QVariantList outputs READ outputs NOTIFY changed)       // Arena screens and Lumiverses (B3)
     Q_PROPERTY(QVariantMap compositionInfo READ composition_info NOTIFY changed)   // project["composition"]
     Q_PROPERTY(QStringList resolumeWarnings READ resolume_warnings NOTIFY changed) // from the last import
+    // Composition source state (FR-13): {kind, width, height, fps, signal, error}, refreshed with dmxStatus.
+    Q_PROPERTY(QVariantMap mediaStatus READ media_status NOTIFY dmxChanged)
 
   public:
     explicit Session(QObject *parent); // no default: QML would construct its own instead of calling create()
@@ -63,6 +67,8 @@ class Session : public QObject {
     std::shared_ptr<const sv::render::MeshLibrary> meshes() const { return meshes_; }
     sv::proto::DmxEngine &dmx() { return dmx_; }
     const QImage &composition() const { return composition_; }
+    const sv::media::MediaSource &media() const { return media_; } // latest() is safe on the render thread
+    QVariantMap media_status() const;
     const std::set<std::string> &selection() const { return selection_; }
     quint64 revision() const { return revision_; } // bumps on any document or selection change
 
@@ -140,6 +146,10 @@ class Session : public QObject {
     // AdvancedOutput.xml.
     Q_INVOKABLE QVariantMap resolumePreset() const;
     // unit: m, cm, mm, in, ft. zUp rotates the file to Y-up. split: one set piece per OBJ group (FR-3).
+    // Screens or window titles for a capture kind (FR-14).
+    Q_INVOKABLE QStringList mediaSources(const QString &kind) const { return sv::media::MediaSource::available(kind); }
+    // kind still or video: copies the file into media/ (linked by absolute path above 200 MB) and selects it.
+    Q_INVOKABLE QString setMediaFile(const QString &kind, const QUrl &url);
     Q_INVOKABLE QString importObj(const QUrl &url, const QString &unit, bool zUp, bool split);
     Q_INVOKABLE QString recover();      // opens the autosave in place of the saved file, unsaved
     Q_INVOKABLE void discardRecovery(); // deletes the autosave
@@ -157,6 +167,7 @@ class Session : public QObject {
     void add_object(sv::json object, const char *label);
     void add_gdtf(const std::string &name, std::vector<std::uint8_t> bytes); // throws on a bad file
     void rebuild_meshes();
+    void update_media(); // opens or reconfigures media_ when composition.source changed
     void check_recovery();
     sv::Package package() const; // the document plus the GDTF types it uses and the other package files
     void load(sv::Package pkg);
@@ -178,6 +189,9 @@ class Session : public QObject {
     sv::proto::DmxEngine dmx_;
     sv::proto::Pattern pattern_ = sv::proto::Pattern::off;
     QImage composition_;
+    sv::media::MediaSource media_;
+    sv::json media_opened_;   // {kind, file/name} media_ was opened with
+    QTemporaryDir media_dir_; // packaged videos are unpacked here, since QMediaPlayer needs a file
     std::set<std::string> selection_;
     quint64 revision_ = 0;
     std::optional<std::pair<std::string, QVector3D>> moving_;

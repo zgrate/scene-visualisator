@@ -136,6 +136,24 @@ ApplicationWindow {
                 horizontalAlignment: Text.AlignRight
                 elide: Text.ElideLeft
             }
+            Rectangle { width: 1; Layout.fillHeight: true; color: Theme.line }
+            Button {
+                id: mediaButton
+                readonly property var st: Session.mediaStatus
+                readonly property var names: ({ testPattern: qsTr("Test pattern"), grid: qsTr("Mapping grid"),
+                                                still: qsTr("Still"), video: qsTr("Video"), screen: qsTr("Screen"),
+                                                window: qsTr("Window") })
+                implicitHeight: 24
+                flat: true
+                font.family: Theme.mono
+                font.pixelSize: Theme.small + 1
+                text: qsTr("MEDIA") + " · " + (names[st.kind] || st.kind) + (!st.live ? ""
+                      : st.signal ? " · %1×%2 · %3 fps".arg(st.width).arg(st.height).arg(st.fps.toFixed(1))
+                      : " · " + qsTr("No signal"))
+                palette.buttonText: st.live && !st.signal ? Theme.warn : Theme.muted
+                onClicked: media.open()
+                MediaCard { id: media; y: -height - 10; x: parent.width - width }
+            }
         }
     }
 

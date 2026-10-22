@@ -3,8 +3,10 @@
 #include "core/interchange.h"
 #include "core/project_file.h"
 
+#include <QEventLoop>
 #include <QGuiApplication>
 #include <QStandardPaths>
+#include <QTimer>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -248,6 +250,55 @@ TEST_CASE("Session autosaves unsaved edits and offers them back after a crash (A
     Session u(nullptr);
     REQUIRE(u.openProject(url).isEmpty());
     CHECK(u.recovery_file().isEmpty());
+}
+
+TEST_CASE(
+    "Session composition: mapping grid outlines slices, stills are packaged, video frames arrive (FR-13, FR-14)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_media";
+    std::filesystem::create_directories(dir);
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const json wall =
+        *std::ranges::find_if(s.document().data().at("objects"), [](const json &o) { return o["type"] == "ledWall"; });
+    const int sx = wall["slice"]["x"], sy = wall["slice"]["y"], sh = wall["slice"]["h"];
+
+    s.edit("composition", "/source", QVariantMap{{"kind", "grid"}});
+    CHECK(s.composition().pixelColor(sx + 2, sy + sh / 3) == QColor(Qt::white)); // slice outline
+    CHECK(s.composition().pixelColor(sx + 40, sy + sh / 3).lightness() < 128);   // grid background
+
+    const QString png = QString::fromStdString((dir / "green.png").string());
+    QImage green(32, 18, QImage::Format_RGB32);
+    green.fill(Qt::green);
+    REQUIRE(green.save(png));
+    REQUIRE(s.setMediaFile("still", QUrl::fromLocalFile(png)).isEmpty());
+    CHECK(s.document().data()["composition"]["source"]["file"] == "media/green.png");
+    const QImage &comp = s.composition();
+    CHECK(comp.pixelColor(comp.width() / 2, comp.height() / 2) == QColor(Qt::green));
+    CHECK_FALSE(
+        s.setMediaFile("still", QUrl::fromLocalFile(SV_SOURCE_DIR "/tests/fixtures/media/testsrc.mp4")).isEmpty());
+
+    const auto path = dir / "media.svproj";
+    REQUIRE(s.saveProject(QUrl::fromLocalFile(QString::fromStdString(path.string()))).isEmpty());
+    CHECK(sv::load_package(path).files.contains("media/green.png"));
+    Session t(nullptr);
+    REQUIRE(t.openProject(QUrl::fromLocalFile(QString::fromStdString(path.string()))).isEmpty());
+    CHECK(t.composition().pixelColor(t.composition().width() / 2, 10) == QColor(Qt::green));
+
+    REQUIRE(t.setMediaFile("video", QUrl::fromLocalFile(SV_SOURCE_DIR "/tests/fixtures/media/testsrc.mp4")).isEmpty());
+    CHECK(t.document().data()["composition"]["source"]["file"] == "media/testsrc.mp4");
+    for (int i = 0; i < 100 && !t.media().status().signal; ++i) // up to 5 s for the decoder to start
+    {
+        QEventLoop loop;
+        QTimer::singleShot(50, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    REQUIRE(t.media().status().signal);
+    CHECK(t.media().status().size == QSize(160, 90));
+    quint64 serial = 0;
+    CHECK_FALSE(t.media().latest(serial).isNull());
+    CHECK(t.media().latest(serial).isNull()); // nothing newer yet
+    t.undo();                                 // back to the still: the live source stops
+    CHECK_FALSE(t.media().active());
 }
 
 int main(int argc, char *argv[]) {

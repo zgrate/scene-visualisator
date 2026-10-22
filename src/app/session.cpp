@@ -180,7 +180,7 @@ void Session::refresh() {
     snapshot_ = std::make_shared<const sv::json>(document_.data());
     if (library_dirty_)
         library_snapshot_ = std::make_shared<const sv::render::FixtureLibrary>(library_), library_dirty_ = false;
-    composition_ = sv::render::make_composition(document_.data());
+    update_media();
     std::vector<std::uint16_t> universes;
     for (const QVariant &u : this->universes())
         universes.push_back(std::uint16_t(u.toInt()));
@@ -797,6 +797,84 @@ QVariantMap Session::resolumePreset() const {
     dir.mkpath(".");
     const QString path = dir.filePath(name_ + ".xml");
     return {{"path", path}, {"url", QUrl::fromLocalFile(path)}, {"exists", QFileInfo::exists(path)}};
+}
+
+void Session::update_media() {
+    const json &comp = document_.data().value("composition", json::object());
+    const json src = comp.value("source", json::object());
+    const std::string kind = src.is_object() ? src.value("kind", std::string()) : std::string();
+    const std::string file = src.is_object() ? src.value("file", std::string()) : std::string();
+    // A package entry ("media/x.png") or a linked absolute path.
+    const auto path_of_file = [&]() -> QString {
+        if (const auto it = other_files_.find(file); it != other_files_.end()) {
+            const QString out = media_dir_.filePath(QString::fromStdString(file).section('/', -1));
+            if (QFile f(out); f.open(QIODevice::WriteOnly))
+                f.write(reinterpret_cast<const char *>(it->second.data()), qint64(it->second.size()));
+            return out;
+        }
+        return QString::fromStdString(file);
+    };
+    QImage still;
+    if (kind == "still") {
+        if (const auto it = other_files_.find(file); it != other_files_.end())
+            still.loadFromData(it->second.data(), int(it->second.size()));
+        else
+            still.load(QString::fromStdString(file));
+    }
+    composition_ = sv::render::make_composition(document_.data(), still);
+
+    const json opened = {{"kind", kind}, {"file", file}, {"name", src.is_object() ? src.value("name", "") : ""}};
+    if (opened != media_opened_) {
+        media_opened_ = opened;
+        const bool live = kind == "video" || kind == "screen" || kind == "window";
+        media_.open(live ? QString::fromStdString(kind) : QString(),
+                    kind == "video" ? path_of_file() : QString::fromStdString(opened["name"].get<std::string>()));
+    }
+    if (kind == "video" && src.is_object())
+        media_.set_playback(src.value("playing", true), src.value("loop", true), src.value("rate", 1.0));
+}
+
+QVariantMap Session::media_status() const {
+    const sv::media::MediaStatus st = media_.status();
+    const json &comp = document_.data().value("composition", json::object());
+    const json &src = comp.value("source", json::object());
+    return {{"kind", QString::fromStdString(src.is_object() ? src.value("kind", std::string()) : std::string())},
+            {"width", st.size.width()},
+            {"height", st.size.height()},
+            {"fps", st.fps},
+            {"signal", st.signal},
+            {"live", media_.active()},
+            {"error", st.error}};
+}
+
+QString Session::setMediaFile(const QString &kind, const QUrl &url) {
+    const QFileInfo info(url.toLocalFile());
+    if (!info.isFile())
+        return tr("Not a file: %1").arg(url.toLocalFile());
+    std::string file = info.absoluteFilePath().toStdString();
+    // Copied into the package like OBJ geometry; big videos stay linked so saves stay quick.
+    if (info.size() <= 200ll * 1024 * 1024) {
+        QString error;
+        const QByteArray bytes = read_file(url, error);
+        if (!error.isEmpty())
+            return error;
+        if (kind == "still" && QImage::fromData(bytes).isNull())
+            return tr("Not an image: %1").arg(info.fileName());
+        file = "media/" + info.fileName().toStdString();
+        for (int n = 2;
+             other_files_.contains(file) && other_files_[file] != std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+             ++n)
+            file = "media/" + info.completeBaseName().toStdString() + "-" + std::to_string(n) + "." +
+                   info.suffix().toStdString();
+        other_files_[file] = {bytes.begin(), bytes.end()};
+    }
+    json source = {{"kind", kind.toStdString()}, {"file", file}, {"name", info.fileName().toStdString()}};
+    if (kind == "video")
+        source.update({{"playing", true}, {"loop", true}, {"rate", 1.0}});
+    if (apply(json::array({{{"op", "add"}, {"path", "/composition/source"}, {"value", source}}}),
+              kind == "video" ? "Video source" : "Still image"))
+        refresh();
+    return {};
 }
 
 QString Session::importObj(const QUrl &url, const QString &unit, bool zUp, bool split) {

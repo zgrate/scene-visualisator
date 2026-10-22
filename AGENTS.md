@@ -42,6 +42,7 @@ python3 tools/dmx_send.py --proto sacn --universes 1-4 --pattern chase   # test 
 | `sv_gdtf` | `src/gdtf` | std, pugixml, miniz. **No Qt.** GDTF reader, DMX→attribute decoder |
 | `sv_proto` | `src/protocol` | std, Asio (private). **No Qt.** Art-Net/sACN receivers, merger, triple buffer, generators |
 | `sv_render` | `src/render` | Qt Gui + QRhi only (no Quick/QML). Scene, beam and wall passes, shaders via `qt_add_shaders` |
+| `sv_media` | `src/media` | Qt Gui + Multimedia. `MediaSource`: video files, screen and window capture |
 | `SceneVisualiser` | `src/app` | Qt Quick/QML. `ViewportItem` (QQuickRhiItem), models for QML, `qml/` |
 
 Hard rules:
@@ -268,3 +269,15 @@ Hard rules:
   universes, so walk channels with `for_each_channel` in `session.cpp`.
 - **Send to Resolume:** `resolumePreset()` names `Documents/Resolume Arena/Presets/Advanced Output/<project>.xml`.
 - **Mapping screen:** the composition comes from `image://composition/<n>`; slices drag in composition pixels.
+
+## 17. Composition sources (B1)
+- **`composition.source.kind`:** `testPattern`, `grid` (mapping grid with coordinates), `still`, `video`, `screen` or
+  `window`. `make_composition(project, still)` in `render/test_pattern.h` draws patterns, or places `still` by
+  `source.fit` (fit, fill, stretch); walls get outlines on top.
+- **`MediaSource`** (`media/media_source.h`) lives on the UI thread. Frames land in a mutex-guarded latest-wins slot;
+  the render thread polls `latest(serial)`, which returns a null image when nothing is new. The player and the capture
+  session each need their own `QVideoSink`: one sink on both delivers nothing.
+- **Session:** `setMediaFile(kind, url)` copies files up to 200 MB into `media/` in the package and links larger ones
+  by absolute path. `mediaSources(kind)` lists screens or windows. `mediaStatus` is `{kind, width, height, fps, signal,
+  live, error}`, refreshed with `dmxChanged()`. The dock's MEDIA button opens `MediaCard.qml`.
+- **Screenshots:** `--screenshot` waits up to 5 s for a live source's first frame.

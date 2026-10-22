@@ -1,5 +1,7 @@
 #include "session.h"
 
+#include "render/test_pattern.h"
+
 #include <QCommandLineParser>
 #include <QDateTime>
 #include <QDir>
@@ -20,12 +22,19 @@ QFile log_file;
 QMutex log_mutex;
 QtMessageHandler default_handler = nullptr;
 
-// image://composition/<anything> is the current composition for the Mapping screen; QML changes the id to reload.
+// image://composition/<anything> is the current composition (or live frame) for the Mapping screen; QML changes the
+// id to reload.
 class CompositionProvider : public QQuickImageProvider {
   public:
     CompositionProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
     QImage requestImage(const QString &, QSize *size, const QSize &) override {
-        const QImage img = Session::instance()->composition();
+        quint64 serial = 0; // 0: always the current frame of a live source
+        const Session *s = Session::instance();
+        QImage img = s->media().latest(serial);
+        if (img.isNull())
+            img = s->composition();
+        else if (img.size() != s->composition().size())
+            img = sv::render::make_composition(*s->snapshot(), img); // placed by source.fit, as on the walls
         *size = img.size();
         return img;
     }
@@ -115,10 +124,21 @@ int main(int argc, char *argv[]) {
     if (args.isSet(shot) && !engine.rootObjects().isEmpty()) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         const QString path = args.value(shot);
-        // After the first real frame; an idle scene may never swap again, and grabWindow renders anew.
+        // After the first real frame; an idle scene may never swap again, and grabWindow renders anew. A live media
+        // source gets up to 5 s to deliver its first frame, so the shot shows it.
         QObject::connect(
             window, &QQuickWindow::frameSwapped, &app,
-            [=] { QTimer::singleShot(0, [=] { QCoreApplication::exit(window->grabWindow().save(path) ? 0 : 2); }); },
+            [=, &session] {
+                auto *poll = new QTimer(window);
+                QObject::connect(poll, &QTimer::timeout, window, [=, &session, tries = 0]() mutable {
+                    if (session.media().active() && !session.media().status().signal && ++tries < 50)
+                        return;
+                    poll->stop();
+                    QTimer::singleShot(session.media().active() ? 600 : 100,
+                                       [=] { QCoreApplication::exit(window->grabWindow().save(path) ? 0 : 2); });
+                });
+                poll->start(100);
+            },
             Qt::SingleShotConnection);
     }
     return app.exec();
