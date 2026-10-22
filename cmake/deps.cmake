@@ -1,6 +1,6 @@
 # Third-party code via FetchContent, pinned by tag (decision D4: no vcpkg in alpha).
-# shortcut: only deps the current milestone uses are declared, add pugixml/spdlog/tinyobjloader here in the
-# milestone that first includes them (M3-M6).
+# shortcut: only deps the current milestone uses are declared, add spdlog/tinyobjloader here in the milestone
+# that first includes them (M6).
 include(FetchContent)
 
 FetchContent_Declare(nlohmann_json
@@ -16,6 +16,14 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5) # miniz 3.0.2 asks for CMake < 3.5, which CMake 4 rejects
 FetchContent_MakeAvailable(nlohmann_json miniz)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
+
+# GDTF description.xml parsing (D5).
+FetchContent_Declare(pugixml
+    URL https://github.com/zeux/pugixml/archive/refs/tags/v1.15.tar.gz
+    URL_HASH SHA256=b39647064d9e28297a34278bfb897092bf33b7c487906ddfc094c9e8868bddcb
+    SYSTEM)
+set(PUGIXML_NO_EXCEPTIONS ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(pugixml)
 
 # Standalone Asio (header-only) for the network thread. sACN uses our own E1.31 receiver on it, not the ETCLabs
 # library (the spec's named fallback): one socket model, no EtcPal threads.
