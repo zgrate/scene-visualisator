@@ -217,7 +217,7 @@ TEST_CASE("Session saves a package with the used GDTF types and opens it again")
     CHECK(s.dirty());
     REQUIRE(s.saveProject(QUrl::fromLocalFile(QString::fromStdString((dir / "rig").string()))).isEmpty());
     CHECK_FALSE(s.dirty());
-    CHECK(s.file_path() == QString::fromStdString(path.string()));
+    CHECK(s.file_path() == QString::fromStdString(path.generic_string()));
 
     const sv::Package pkg = sv::load_package(path);
     CHECK(pkg.files.contains("gdtf/Generic@Spot_7ch.gdtf"));
@@ -354,7 +354,7 @@ TEST_CASE("Session autosaves unsaved edits and offers them back after a crash (A
     REQUIRE(t.recover().isEmpty());
     CHECK(t.document().data()["objects"][0]["name"] == "After the save");
     CHECK(t.dirty());
-    CHECK(t.file_path() == QString::fromStdString(path.string()));
+    CHECK(t.file_path() == QString::fromStdString(path.generic_string()));
     REQUIRE(t.saveProject({}).isEmpty());
     CHECK_FALSE(std::filesystem::exists(sv::autosave_path(path)));
 
@@ -628,6 +628,10 @@ int main(int argc, char *argv[]) {
     QSettings("SceneVisualiser", "Scene Visualiser").clear();
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) // also covers test discovery at build time
         qputenv("QT_QPA_PLATFORM", "offscreen");
+#ifdef Q_OS_WIN
+    if (qEnvironmentVariableIsEmpty("QT_QPA_FONTDIR")) // offscreen finds no fonts on Windows by itself
+        qputenv("QT_QPA_FONTDIR", qgetenv("WINDIR") + "/Fonts");
+#endif
     QGuiApplication app(argc, argv); // composition text needs fonts
     return Catch::Session().run(argc, argv);
 }

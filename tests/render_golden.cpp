@@ -74,7 +74,12 @@ int main(int argc, char *argv[]) {
     const QString golden = QString::fromLocal8Bit(argv[1]);
     const bool compare = !(argc > 2 && QByteArray(argv[2]) == "--no-compare");
 
-    // shortcut: OpenGL only (llvmpipe here, CI GL drivers elsewhere); add D3D12/WARP and Metal runs with the CI matrix.
+#ifdef Q_OS_WIN
+    // The app's backend (B1), on WARP: CI runners have no GPU and Windows' own OpenGL is 1.1.
+    QRhiD3D11InitParams params;
+    std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::D3D11, &params, QRhi::PreferSoftwareRenderer));
+#else
+    // shortcut: OpenGL on macOS too (the app uses Metal there); add a Metal run when macOS gets a golden.
     QRhiGles2InitParams params;
 #ifdef __APPLE__
     // The default macOS context is legacy GL 2.1, whose GLSL 120 has no `flat`; core 4.1 gets the GLSL 150 shaders.
@@ -83,8 +88,9 @@ int main(int argc, char *argv[]) {
 #endif
     params.fallbackSurface = QRhiGles2InitParams::newFallbackSurface(params.format);
     std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::OpenGLES2, &params));
+#endif
     if (!rhi) {
-        std::fprintf(stderr, "no OpenGL QRhi, skipping\n");
+        std::fprintf(stderr, "no QRhi, skipping\n");
         return 77; // ctest SKIP_RETURN_CODE
     }
     const QImage actual = render_demo(rhi.get(), {640, 360});

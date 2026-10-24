@@ -1,0 +1,2 @@
+# Approval files are compared byte for byte; keep LF on Windows checkouts.
+tests/approved/** -text
