@@ -49,7 +49,7 @@ TEST_CASE("FR-2 schema 2 venue.decks migrate to deck objects (schema 3)") {
     sv::json p = sv::new_project();
     p["schemaVersion"] = 2;
     const sv::json truss = sv::new_truss("T");
-    p["objects"] = {truss};
+    p["objects"] = sv::json::array({truss}); // not {x}: Apple Clang copies x instead of wrapping it
     p["venue"]["decks"] = {{{"uuid", "d1"}, {"position", {1, 0, 2}}, {"width", 6}, {"depth", 3}, {"height", 0.8}},
                            {{"uuid", "d2"}, {"position", {0, 0, 0}}, {"width", 2}, {"depth", 2}, {"height", 0.4}}};
     sv::migrate(p);

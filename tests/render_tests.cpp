@@ -254,7 +254,7 @@ TEST_CASE("a wall with strings draws one column per string along its polyline") 
     wall["slice"] = {{"x", 100}, {"y", 0}, {"w", 2}, {"h", 200}};
     wall["pixelPitch"] = 10.0;
     wall["strings"] = {{{0, 3, 0}, {0, 3, -1}, {0, 3, -3}}, {{1, 3, 0}, {1, 3, -3}}};
-    project["objects"] = {wall};
+    project["objects"] = sv::json::array({wall}); // not {x}: Apple Clang copies x instead of wrapping it
     const RenderScene s = build_scene(project, {}, {}, 0);
     REQUIRE(s.walls.size() == 3 * 4); // per segment, two crossed quads each mirrored
     const float cw = project["composition"]["width"], ch = project["composition"]["height"];
@@ -404,7 +404,7 @@ TEST_CASE("FR-13 output feeds follow rotated slices and rotated outRects") {
     a["outRect"] = {{"x", 0}, {"y", 0}, {"w", 100}, {"h", 100}};
     b["output"] = "out", b["slice"] = {{"x", 0}, {"y", 60}, {"w", 100}, {"h", 40}};
     b["outRect"] = {{"x", 0}, {"y", 30}, {"w", 100}, {"h", 40}, {"angle", 90}}; // stands upright in the feed
-    project["objects"] = {a};
+    project["objects"] = sv::json::array({a}); // not {x}: Apple Clang copies x instead of wrapping it
 
     QImage base(100, 100, QImage::Format_RGBA8888);
     base.fill(Qt::black);
@@ -420,7 +420,7 @@ TEST_CASE("FR-13 output feeds follow rotated slices and rotated outRects") {
     for (int y = 0; y < 100; ++y) // top half blue, bottom half yellow
         for (int x = 0; x < 100; ++x)
             feed.setPixelColor(x, y, y < 50 ? Qt::blue : Qt::yellow);
-    project["objects"] = {b};
+    project["objects"] = sv::json::array({b}); // not {x}: Apple Clang copies x instead of wrapping it
     out = sv::render::compose_feeds(project, base, {{"out", feed}});
     CHECK(out.pixelColor(10, 80) == QColor(Qt::blue)); // the outRect's own x runs down the feed
     CHECK(out.pixelColor(90, 80) == QColor(Qt::yellow));
@@ -458,7 +458,7 @@ TEST_CASE("FR-19 paint_drawing hits a wall of strings per segment, never the sta
     sv::json project = sv::new_project();
     sv::json wall = sv::new_led_wall("Net");
     wall["strings"] = {{{0, 3, 0}, {0, 3, -1}, {0, 3, -3}}, {{1, 3, 0}, {1, 3, -3}}};
-    project["objects"] = {wall};
+    project["objects"] = sv::json::array({wall}); // not {x}: Apple Clang copies x instead of wrapping it
     DrawingSheet sheet;
     sheet.text = false; // no fonts without a QGuiApplication
     QImage image(QSize(420, 297), QImage::Format_RGBA8888);

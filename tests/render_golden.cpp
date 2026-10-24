@@ -76,7 +76,12 @@ int main(int argc, char *argv[]) {
 
     // shortcut: OpenGL only (llvmpipe here, CI GL drivers elsewhere); add D3D12/WARP and Metal runs with the CI matrix.
     QRhiGles2InitParams params;
-    params.fallbackSurface = QRhiGles2InitParams::newFallbackSurface();
+#ifdef __APPLE__
+    // The default macOS context is legacy GL 2.1, whose GLSL 120 has no `flat`; core 4.1 gets the GLSL 150 shaders.
+    params.format.setVersion(4, 1);
+    params.format.setProfile(QSurfaceFormat::CoreProfile);
+#endif
+    params.fallbackSurface = QRhiGles2InitParams::newFallbackSurface(params.format);
     std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::OpenGLES2, &params));
     if (!rhi) {
         std::fprintf(stderr, "no OpenGL QRhi, skipping\n");

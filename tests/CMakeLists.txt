@@ -30,6 +30,9 @@ target_include_directories(sv_session_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/ap
 file(GLOB sv_test_gdtf CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/resources/gdtf/*.gdtf)
 qt_add_resources(sv_session_tests "test_gdtf" PREFIX "/gdtf" BASE ${PROJECT_SOURCE_DIR}/resources/gdtf FILES ${sv_test_gdtf})
 target_link_libraries(sv_session_tests PRIVATE Catch2::Catch2 sv_render sv_proto sv_media sv_mcp Qt6::Quick Qt6::Network Qt6::Svg)
+if(WIN32)
+    target_link_libraries(sv_session_tests PRIVATE dbghelp) # crash_reports.cpp's minidump handler
+endif()
 catch_discover_tests(sv_session_tests)
 target_compile_definitions(sv_session_tests PRIVATE SV_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
