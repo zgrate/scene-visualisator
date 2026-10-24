@@ -39,7 +39,7 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
-          modules: 'qtshadertools qtsvg qtmultimedia'
+          modules: 'qtshadertools qtmultimedia' # Qt 6.12 ships qtsvg in the base package
           aqtversion: '==3.3.*'
           # shortcut: aqt 3.3.0 cannot find Qt 6.12's per-compiler Windows repo; pinned to miurahr/aqtinstall#1048,
           # back to aqtversion alone once a release includes it.
