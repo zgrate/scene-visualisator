@@ -41,6 +41,9 @@ jobs:
           version: '6.12.0'
           modules: 'qtshadertools qtsvg qtmultimedia'
           aqtversion: '==3.3.*'
+          # shortcut: aqt 3.3.0 cannot find Qt 6.12's per-compiler Windows repo; pinned to miurahr/aqtinstall#1048,
+          # back to aqtversion alone once a release includes it.
+          aqtsource: ${{ runner.os == 'Windows' && 'git+https://github.com/jdpurcell/aqtinstall.git@6f0f842da47c744cdc814cd94da9828d934d7bf0' || '' }}
           cache: true
 
       - name: Updater SDKs
