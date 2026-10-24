@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes the five bundled generic GDTF types (resources/gdtf/*.gdtf), modelled on the POC library.
+"""Writes the bundled generic GDTF types (resources/gdtf/*.gdtf), modelled on the POC library.
 
 They are the placeholder types for unpatched fixtures and the GDTF test fixtures. Re-run after editing:
   python3 tools/make_generic_gdtf.py
@@ -86,6 +86,10 @@ TYPES = {
     "Generic@Blinder": fixture("Blinder", "Blinder", [channel(1, "Beam", DIM)], beam=40, emitter="#ffc88c",
         model=(0.2, 0.3, 0.4),
         geometries='<Geometry Name="Base" Model="Body"><Beam Name="Beam" Model="Body" BeamAngle="40" FieldAngle="60" LuminousFlux="20000" BeamRadius="0.15" BeamType="Wash"/></Geometry>'),
+    # grandMA's "Generic Dimmer": a conventional on a dimmer channel.
+    "Generic@Dimmer": fixture("Dimmer", "Dimmer", [channel(1, "Beam", DIM)], beam=26, field=36, emitter="#ffd0a0",
+        model=(0.25, 0.25, 0.25), lumens=3000,
+        geometries='<Geometry Name="Base" Model="Body"><Beam Name="Beam" Model="Body" BeamAngle="26" FieldAngle="36" LuminousFlux="3000" BeamRadius="0.08" BeamType="Wash"/></Geometry>'),
     "Generic@Pixel Bar 8": fixture("Pixel Bar 8", "PixBar8", [channel(1, "Base", DIM)] + [
         channel(2 + i * 3 + k, f"Pixel{i + 1}", fn(f"ColorAdd_{c}")) for i in range(8) for k, c in enumerate("RGB")],
         beam=25, model=(1.0, 0.1, 0.1),

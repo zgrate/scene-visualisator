@@ -25,14 +25,16 @@
         "QT_HOST_PATH": "$env{QT_HOST_PATH}",
         "BUILD_TESTING": "OFF"
       }
-    }
+    },
+    { "name": "win-llvm-mingw", "inherits": "win-mingw", "toolchainFile": "${sourceDir}/cmake/llvm-mingw.cmake" }
   ],
   "buildPresets": [
     { "name": "linux-debug", "configurePreset": "linux-debug" },
     { "name": "linux-release", "configurePreset": "linux-release" },
     { "name": "mac", "configurePreset": "mac" },
     { "name": "win-msvc", "configurePreset": "win-msvc", "configuration": "Release" },
-    { "name": "win-mingw", "configurePreset": "win-mingw" }
+    { "name": "win-mingw", "configurePreset": "win-mingw" },
+    { "name": "win-llvm-mingw", "configurePreset": "win-llvm-mingw" }
   ],
   "testPresets": [
     { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },

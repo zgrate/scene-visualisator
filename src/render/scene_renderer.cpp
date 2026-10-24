@@ -29,7 +29,7 @@ std::vector<Vertex> cube_vertices() {
                                    {{0, 1, 0}, {0, 0, 1}, {1, 0, 0}}, {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}},
                                    {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}}, {{0, 0, -1}, {0, 1, 0}, {1, 0, 0}}};
     for (const auto &[n, u, v] : faces) {
-        const auto corner = [&](float a, float b) {
+        const auto corner = [n = n, u = u, v = v](float a, float b) { // Apple Clang 15: no binding captures
             const QVector3D p = 0.5f * (n + a * u + b * v);
             return Vertex{{p.x(), p.y(), p.z()}, {n.x(), n.y(), n.z()}};
         };
@@ -124,7 +124,9 @@ struct SceneRenderer::Gpu {
         if (additive) {
             QRhiGraphicsPipeline::TargetBlend blend;
             blend.enable = true;
-            blend.srcColor = blend.dstColor = QRhiGraphicsPipeline::One;
+            // Screen blend: overlapping beams approach white instead of clipping to it.
+            blend.srcColor = QRhiGraphicsPipeline::One;
+            blend.dstColor = QRhiGraphicsPipeline::OneMinusSrcColor;
             blend.srcAlpha = QRhiGraphicsPipeline::Zero;
             blend.dstAlpha = QRhiGraphicsPipeline::One;
             p->setTargetBlends({blend});

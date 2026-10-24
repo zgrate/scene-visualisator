@@ -12,3 +12,4 @@ __pycache__/
 *.received
 /.ai/
 !docs/images/*.png
+/dist/

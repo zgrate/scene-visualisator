@@ -49,6 +49,12 @@ Item {
         color: Theme.panel
         border.color: Theme.line
         radius: Theme.radius
+        // Clicks and wheel on the card's empty parts stop here instead of selecting or zooming in the viewport below
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+            onWheel: wheel => wheel.accepted = true
+        }
     }
     Item {
         id: header

@@ -27,9 +27,10 @@ void main() {
     float outline = 1.0 - min(abs(edge) / fwidth(edge) / 1.5, 1.0);
     c = mix(c, vec3(0.36, 0.38, 0.44), outline * fade);
     int n = int(floor_info.w);
+    vec3 pools = vec3(0.0);
     for (int i = 0; i < n; ++i) {
         float r = length(p - spot_pos[i].xy) / max(spot_pos[i].z, 0.01);
-        c += spot_col[i].rgb * (1.0 - smoothstep(0.75, 1.0, r)) * (0.35 + 0.25 * (1.0 - r));
+        pools += spot_col[i].rgb * (1.0 - smoothstep(0.75, 1.0, r)) * (0.35 + 0.25 * (1.0 - r));
     }
-    frag = vec4(c, 1.0);
+    frag = vec4(c + 1.0 - exp(-1.5 * pools), 1.0); // soft limit: overlapping pools stop short of white
 }

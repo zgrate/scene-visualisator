@@ -17,7 +17,10 @@ struct MvrScene {
     std::string aux_data;         // <AUXData> verbatim (symbols, classes, positions); goes to project["mvr"]
     std::vector<std::string> warnings;
 };
-MvrScene mvr_import(std::span<const std::uint8_t> zip); // throws InterchangeError
+// Type and mode text -> {library GDTF file, mode}, asked for fixtures whose GDTF is not in the MVR (grandMA3 exports
+// none). An empty file keeps the text and warns.
+using TypeResolver = std::function<std::pair<std::string, std::string>(const std::string &, const std::string &)>;
+MvrScene mvr_import(std::span<const std::uint8_t> zip, const TypeResolver &resolve = {}); // throws InterchangeError
 
 // files: the package entries (gdtf/, geometry/). Walls, trusses and OBJ set pieces without MVR geometry get a
 // generated .glb. Pixel strips and cameras have no MVR counterpart and are left out.

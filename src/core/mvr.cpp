@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <memory>
 #include <numbers>
 #include <pugixml.hpp>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 namespace sv {
 
@@ -108,6 +110,7 @@ struct Reader {
     MvrScene &out;
     const ZipEntries &zip;
     pugi::xml_node aux;
+    const TypeResolver &resolve;
     std::set<std::string> gdtf_entries;
 
     const std::vector<std::uint8_t> *file(const std::string &name) const {
@@ -141,15 +144,36 @@ struct Reader {
         const std::string el = n.name(), name = n.attribute("name").as_string();
         std::set<std::string> handled{"Matrix", "ChildList"};
         json o;
-        if (el == "Fixture") {
-            std::string spec = n.child_value("GDTFSpec");
+        std::array<double, 12> matrix = parse_matrix(n.child_value("Matrix"));
+        // grandMA exports set pieces and groups as Fixtures of its own placeholder types, with no GDTF inside.
+        std::string ma = n.child_value("GDTFSpec");
+        std::ranges::transform(ma, ma.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        const bool ma_group = ma.starts_with("generic@grouping") || ma.starts_with("generic@universal");
+        const bool ma_truss = ma.starts_with("set@") && ma.find("truss") != std::string::npos;
+        if (el == "Fixture" && ma_group) {
+            o = new_set_piece(name, "");
+            o["type"] = "group";
+            o.erase("geometry");
+        } else if (el == "Fixture" && ma_truss) {
+            // The piece is centred and runs along its local Y; ours runs along X, so turn the frame (v, -u, w).
+            // Length is the number after the last '-' in cm (FD34-250); corners (FD34-COR) are a 0.29 m cube.
+            const std::array<double, 12> m = matrix;
+            for (int r = 0; r < 3; ++r)
+                matrix[std::size_t(r)] = m[std::size_t(3 + r)], matrix[std::size_t(3 + r)] = -m[std::size_t(r)];
+            const double cm = std::atof(ma.c_str() + ma.rfind('-') + 1);
+            o = new_truss(name, cm > 0 ? "straight" : "corner", cm > 0 ? cm / 100 : 0.29);
+        } else if (el == "Fixture") {
+            std::string spec = n.child_value("GDTFSpec"), mode = n.child_value("GDTFMode");
             if (!spec.empty() && !file(spec) && file(spec + ".gdtf"))
                 spec += ".gdtf";
             if (file(spec))
                 gdtf_entries.insert(spec), out.files["gdtf/" + spec] = *file(spec);
+            else if (auto [lib, lib_mode] = resolve ? resolve(spec, mode) : std::pair<std::string, std::string>();
+                     !lib.empty())
+                spec = std::move(lib), mode = std::move(lib_mode);
             else
                 out.warnings.push_back("\"" + name + "\": GDTF file \"" + spec + "\" is not in the MVR");
-            o = new_fixture(name, spec, n.child_value("GDTFMode"));
+            o = new_fixture(name, spec, mode);
             handled.insert({"GDTFSpec", "GDTFMode"});
             const std::string id = n.child_value("FixtureID");
             char *end = nullptr;
@@ -219,10 +243,12 @@ struct Reader {
         o["uuid"] = n.attribute("uuid").empty() ? new_uuid() : std::string(n.attribute("uuid").as_string());
         o["parent"] = parent;
         o["layer"] = layer;
-        const Transform t = transform_from_mvr(parse_matrix(n.child_value("Matrix")));
+        const Transform t = transform_from_mvr(matrix);
         o["position"] = t.position, o["rotation"] = t.rotation, o["scale"] = t.scale;
 
         json mvr = {{"element", el}, {"xml", ""}};
+        if (el == "Fixture" && ma_truss)
+            mvr["axis"] = "y"; // turned back on export
         std::string xml;
         for (pugi::xml_node c : n.children())
             if (c.type() != pugi::node_element || !handled.contains(c.name()))
@@ -304,7 +330,8 @@ struct Writer {
         if (el.empty()) {
             const auto it = elements.find(type);
             if (it == elements.end())
-                return; // pixel strips and cameras have no MVR object
+                return; // shortcut: pixel strips, cameras, decks and shapes have no MVR object; export decks
+                       // and shapes as SceneObjects with generated glb when someone needs them in another tool
             el = it->second;
         }
         pugi::xml_document kept; // the object's verbatim MVR children
@@ -325,7 +352,11 @@ struct Writer {
                     dst[i] = o[key][i].get<double>();
         };
         vec("position", t.position), vec("rotation", t.rotation), vec("scale", t.scale);
-        const std::array<double, 12> m = mvr_from_transform(t);
+        std::array<double, 12> m = mvr_from_transform(t);
+        if (mvr.value("axis", std::string()) == "y")
+            for (int r = 0; r < 3; ++r) // (u, v) = (-v', u'), undoing the import's turn
+                std::tie(m[std::size_t(r)], m[std::size_t(3 + r)]) =
+                    std::pair(-m[std::size_t(3 + r)], m[std::size_t(r)]);
         std::string mt;
         for (int c = 0; c < 4; ++c)
             mt += "{" + num(m[c * 3]) + "," + num(m[c * 3 + 1]) + "," + num(m[c * 3 + 2]) + "}";
@@ -349,7 +380,7 @@ struct Writer {
                 a.append_attribute("break").set_value(0);
                 a.text().set((p.value("universe", 1) - 1) * 512 + p.value("address", 1));
             }
-        } else if (type != "group" && !kept.child("Geometries")) {
+        } else if (type != "group" && el != "Fixture" && !kept.child("Geometries")) {
             if (const std::string file = geometry(o); !file.empty())
                 n.append_child("Geometries")
                     .append_child("Geometry3D")
@@ -525,7 +556,7 @@ std::vector<std::uint8_t> write_glb(const std::vector<float> &positions) {
     return out;
 }
 
-MvrScene mvr_import(std::span<const std::uint8_t> bytes) {
+MvrScene mvr_import(std::span<const std::uint8_t> bytes, const TypeResolver &resolve) {
     ZipEntries zip;
     try {
         zip = read_zip(bytes);
@@ -543,7 +574,7 @@ MvrScene mvr_import(std::span<const std::uint8_t> bytes) {
         throw InterchangeError("not an MVR scene description");
 
     MvrScene out;
-    Reader reader{out, zip, scene.child("AUXData"), {}};
+    Reader reader{out, zip, scene.child("AUXData"), resolve, {}};
     if (reader.aux)
         out.aux_data = xml_of(reader.aux);
     for (pugi::xml_node l : scene.child("Layers").children("Layer")) {

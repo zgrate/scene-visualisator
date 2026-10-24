@@ -183,7 +183,7 @@ TEST_CASE("MVR export of our own rig generates geometry and re-imports (FR-22)")
     CHECK(s.layers.size() == 1);
     std::size_t exported = 0;
     for (const json &o : project["objects"]) {
-        if (o["type"] == "pixelStrip" || o["type"] == "camera")
+        if (o["type"] == "pixelStrip" || o["type"] == "camera" || o["type"] == "deck" || o["type"] == "shape")
             continue; // no MVR counterpart
         ++exported;
         const json *r = find(s.objects, o["uuid"]);
@@ -216,4 +216,73 @@ TEST_CASE("glTF writer output reads back with flat normals") {
     CHECK(g[0].vertices[5] == 1.0f); // normal +Z
     CHECK_THROWS_AS(parse_gltf(bytes("nope")), InterchangeError);
     CHECK_THROWS_AS(mvr_import(bytes("nope")), InterchangeError);
+}
+
+TEST_CASE("grandMA set pieces import as trusses and groups, and export as they came (FR-22)") {
+    const std::string xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<GeneralSceneDescription verMajor="1" verMinor="6">
+  <Scene>
+    <Layers>
+      <Layer name="Set" uuid="L1">
+        <ChildList>
+          <Fixture name="Universal" uuid="U1">
+            <GDTFSpec>Generic@Universal.gdtf</GDTFSpec><GDTFMode>Default</GDTFMode>
+          </Fixture>
+          <Fixture name="stage" uuid="G1">
+            <Matrix>{1,0,0}{0,1,0}{0,0,1}{0,0,0}</Matrix>
+            <ChildList>
+              <Fixture name="upright" uuid="T1">
+                <Matrix>{1,0,0}{0,0,1}{0,-1,0}{1000,8300,1250}</Matrix>
+                <GDTFSpec>Set@eurotruss_FD34-250.gdtf</GDTFSpec><GDTFMode>Default</GDTFMode>
+                <FixtureID>5</FixtureID>
+              </Fixture>
+              <Fixture name="dimmer" uuid="D1">
+                <Matrix>{1,0,0}{0,1,0}{0,0,1}{0,0,0}</Matrix>
+                <GDTFSpec>Generic@Dimmer.gdtf</GDTFSpec><GDTFMode>Mode 0</GDTFMode>
+              </Fixture>
+              <Fixture name="corner" uuid="T2">
+                <Matrix>{1,0,0}{0,1,0}{0,0,1}{4650,8300,2950}</Matrix>
+                <GDTFSpec>Set@eurotruss_FD34-COR.gdtf</GDTFSpec><GDTFMode>Default</GDTFMode>
+              </Fixture>
+            </ChildList>
+            <GDTFSpec>Generic@Grouping.gdtf</GDTFSpec><GDTFMode>Default</GDTFMode>
+          </Fixture>
+        </ChildList>
+      </Layer>
+    </Layers>
+  </Scene>
+</GeneralSceneDescription>
+)";
+    const auto resolve = [](const std::string &spec, const std::string &) {
+        return spec == "Generic@Dimmer.gdtf" ? std::pair<std::string, std::string>("Generic@Dimmer.gdtf", "1ch")
+                                             : std::pair<std::string, std::string>();
+    };
+    const MvrScene a = mvr_import(write_zip({{"GeneralSceneDescription.xml", bytes(xml)}}), resolve);
+    CHECK(a.warnings.empty());
+    REQUIRE(a.objects.size() == 5);
+    CHECK(find(a.objects, "D1")->at("mode") == "1ch");
+    CHECK(find(a.objects, "U1")->at("type") == "group");
+    CHECK(find(a.objects, "G1")->at("type") == "group");
+    const json &up = *find(a.objects, "T1");
+    CHECK(up["type"] == "truss");
+    CHECK(up["parent"] == "G1");
+    CHECK(up["length"].get<double>() == Approx(2.5));
+    CHECK(up["position"][2].get<double>() == Approx(-8.3));
+    CHECK(up["rotation"] == json::array({0.0, 90.0, 90.0})); // Ry·Rz turns our X (the bar) up to Y
+    const json &corner = *find(a.objects, "T2");
+    CHECK(corner["trussType"] == "corner");
+    CHECK(corner["length"].get<double>() == Approx(0.29));
+
+    json project = new_project();
+    project["objects"] = a.objects;
+    project["layers"] = a.layers;
+    ZipEntries files;
+    const auto zip = mvr_export(project, files);
+    const auto entries = read_zip(zip);
+    const std::string out(entries.at("GeneralSceneDescription.xml").begin(),
+                          entries.at("GeneralSceneDescription.xml").end());
+    CHECK(out.find("<Matrix>{1,0,0}{0,0,1}{0,-1,0}{1000,8300,1250}</Matrix>") != std::string::npos);
+    CHECK(out.find("<GDTFSpec>Set@eurotruss_FD34-250.gdtf</GDTFSpec>") != std::string::npos);
+    CHECK(out.find("<Fixture name=\"stage\"") != std::string::npos);
+    CHECK(mvr_import(zip, resolve).objects == a.objects);
 }

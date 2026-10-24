@@ -20,7 +20,12 @@ struct Fixture {
     Fixture() {
         server.set_info("test", "1.0", "hello");
         server.set_tools({
-            {"echo", "Echo", {{"type", "object"}}, true, [](const json &a) { return text_result(a); }, {}},
+            {"echo",
+             "Echo",
+             {{"type", "object"}, {"required", {"a"}}},
+             true,
+             [](const json &a) { return text_result(a); },
+             {}},
             {"boom",
              "Throws",
              {{"type", "object"}},
@@ -89,6 +94,9 @@ TEST_CASE("MCP tools list, call, errors and availability", "[mcp]") {
 
     const json echo = f.call(rpc("tools/call", {{"name", "echo"}, {"arguments", {{"a", 1}}}}))["result"];
     CHECK(echo["structuredContent"]["a"] == 1);
+    const json missing = f.call(rpc("tools/call", {{"name", "echo"}, {"arguments", {{"b", 1}}}}))["result"];
+    CHECK(missing["isError"] == true);
+    CHECK(missing["content"][0]["text"] == "Missing argument: a");
     const json boom = f.call(rpc("tools/call", {{"name", "boom"}}))["result"];
     CHECK(boom["isError"] == true);
     CHECK(boom["content"][0]["text"] == "kaput");
@@ -98,7 +106,7 @@ TEST_CASE("MCP tools list, call, errors and availability", "[mcp]") {
     f.debug = true;
     CHECK(f.call(rpc("tools/list"))["result"]["tools"].size() == 3);
     CHECK(f.call(rpc("tools/call", {{"name", "secret"}}))["result"]["content"][0]["text"] == "x");
-    CHECK(f.server.status().calls == 3);
+    CHECK(f.server.status().calls == 4);
     CHECK(f.server.status().last_tool == "secret");
 
     CHECK(f.call(rpc("resources/list"))["result"]["resources"][0]["uri"] == "visualiser://project.json");
@@ -133,8 +141,8 @@ TEST_CASE("MCP answers over a real socket with keep-alive", "[mcp]") {
     auto [head, body] = exchange(rpc("initialize").dump());
     CHECK(head.starts_with("HTTP/1.1 200"));
     CHECK(json::parse(body)["result"]["serverInfo"]["name"] == "test");
-    std::tie(head, body) =
-        exchange(rpc("tools/call", {{"name", "echo"}, {"arguments", {{"big", std::string(100000, 'x')}}}}).dump());
+    std::tie(head, body) = exchange(
+        rpc("tools/call", {{"name", "echo"}, {"arguments", {{"a", 1}, {"big", std::string(100000, 'x')}}}}).dump());
     CHECK(json::parse(body)["result"]["structuredContent"]["big"].get<std::string>().size() == 100000);
     f.server.stop();
     CHECK_FALSE(f.server.status().listening);

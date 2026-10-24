@@ -8,14 +8,14 @@ namespace sv {
 
 using json = nlohmann::json;
 
-inline constexpr int schema_version = 2;
+inline constexpr int schema_version = 3;
 
 std::string new_uuid(); // random v4, lowercase 8-4-4-4-12
 
 json new_project();
-// Upgrades an older project.json in place to schema_version (unknown keys stay). Schema 1 is the alpha.
+// Upgrades an older project.json in place to schema_version (unknown keys stay). Schema 1 is the alpha; schema 3 moves
+// venue.decks into objects.
 void migrate(json &project);
-json new_deck(double width, double depth, double height); // stage deck or riser, positioned by "position"
 
 // Scene objects. All share uuid, type, name, parent (uuid or null), position, rotation (deg), scale.
 json new_fixture(std::string name, std::string gdtf_file, std::string mode);
@@ -23,6 +23,10 @@ json new_led_wall(std::string name);
 json new_truss(std::string name, std::string truss_type = "straight", double length = 3.0);
 json new_set_piece(std::string name, std::string geometry_file);
 json new_camera(std::string name);
+// Stage deck or riser (podest): a box from y 0 up to `height`, centred on its position in X and Z.
+json new_deck(double width, double depth, double height);
+// Primitive set piece: shape box, cylinder (axis Y) or wedge (full height at -Z, zero at +Z), sitting on y 0.
+json new_shape(std::string name, std::string shape, double width, double height, double depth);
 // B12 LED pixel strip (WLED / Resolume Lumiverse). Cells run along local +X over `length` metres, centred.
 json new_pixel_strip(std::string name, int pixels = 60);
 

@@ -5,6 +5,8 @@
 #include "protocol/merger.h"
 #include "protocol/triple_buffer.h"
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,6 +20,25 @@ struct EngineConfig {
     std::string bind_address = "0.0.0.0";
     std::string sacn_interface = "0.0.0.0"; // IPv4 address of the NIC that joins multicast groups
     std::string node_name = "Scene Visualiser";
+};
+
+// Signal output (proxy): what the engine publishes goes out again, at `universe + universe_offset`.
+struct OutputConfig {
+    bool enabled = false;
+    bool sacn = false;          // false = Art-Net
+    std::string target;         // unicast IPv4; empty = Art-Net broadcast 255.255.255.255 or sACN multicast
+    std::uint16_t port = 0;     // 0 = the protocol's port (tests use their own)
+    int universe_offset = 0;
+    std::uint8_t priority = 100; // sACN
+    double rate_hz = 44;         // changed universes per second; unchanged ones are refreshed once a second
+    bool operator==(const OutputConfig &) const = default;
+};
+
+struct OutputStatus {
+    bool enabled = false;
+    double packets_per_s = 0;
+    std::size_t universes = 0; // sent in the last second
+    std::string error;
 };
 
 struct UniverseFrame {
@@ -35,6 +56,12 @@ struct UniverseStatus {
     std::vector<std::string> source_ids; // same order: "artnet:<ip>", "sacn:<cid>", "internal:..."
     std::array<std::uint8_t, 512> winner{}; // index into sources, UniverseMerger::no_winner if none
     MergePolicy policy = MergePolicy::priority;
+};
+
+// The last ArtTimeCode received; ms is -1 when none arrived in the last second.
+struct Timecode {
+    std::int64_t ms = -1;
+    double fps = 25;
 };
 
 class DmxEngine {
@@ -55,6 +82,19 @@ class DmxEngine {
     void set_intensity_mask(std::uint16_t universe, std::bitset<512> mask);
     void set_internal_frame(std::uint16_t universe, std::optional<Slots> frame); // paste-a-frame / fader page
     void set_generator(Pattern pattern, double speed, std::vector<GeneratorTarget> targets);
+    // Show playback, mixed per slot with the live merge (see PlaybackMix). nullopt clears it.
+    void set_playback(std::uint16_t universe, std::optional<PlaybackMix> mix);
+    // Light control: slots set in the mask override whatever the merge or playback gives. nullopt clears it.
+    void set_programmer(std::uint16_t universe, std::optional<std::pair<Slots, std::bitset<512>>> programmer);
+    // Called on the network thread with every published universe (show recording). Empty clears it.
+    void set_tap(std::function<void(std::uint16_t, const Slots &)> tap);
+
+    // Sends every published universe out; packets from our own output socket are never ingested.
+    void set_output(OutputConfig config);
+    OutputStatus output_status() const;
+
+    Timecode timecode() const; // any thread
+    std::uint64_t publish_serial() const; // any thread; advances with every universe the merge publishes
 
     // Render thread: one consumer per universe; the pointer stays valid for the engine's lifetime.
     TripleBuffer<UniverseFrame> *frames(std::uint16_t universe);

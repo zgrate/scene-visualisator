@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <random>
 #include <set>
 #include <thread>
 
@@ -15,7 +16,8 @@ namespace {
 
 using asio::ip::udp;
 constexpr auto tick = std::chrono::microseconds(1'000'000 / 44); // internal sources run at DMX rate
-const std::string generator_id = "internal:generator", frame_id = "internal:frame";
+const std::string generator_id = "internal:generator", frame_id = "internal:frame", playback_id = "internal:playback",
+                  programmer_id = "internal:programmer";
 
 std::string cid_hex(const Cid &cid) {
     std::string s;
@@ -35,6 +37,9 @@ bool sacn_stale(std::uint8_t last, std::uint8_t seq) {
 } // namespace
 
 struct DmxEngine::Impl {
+    std::atomic<std::int64_t> timecode_ms{-1}, timecode_at{0}; // at: steady_clock ticks
+    std::atomic<double> timecode_fps{25};
+    std::atomic<std::uint64_t> published{0}; // every universe publish, for the viewport's redraw check
     struct Pending {
         std::string id, name;
         Slots data;
@@ -50,14 +55,20 @@ struct DmxEngine::Impl {
         std::uint64_t frames_this_second = 0, lost = 0, dropped = 0;
         double rate_hz = 0;
         std::uint64_t serial = 0;
+        std::optional<PlaybackMix> playback;                          // mixed into the merge while set
+        std::optional<std::pair<Slots, std::bitset<512>>> programmer; // overrides its masked slots
+        Slots published{};                                            // the last result, for the output
+        bool out_dirty = false;
+        Clock::time_point out_sent{};
+        std::uint8_t out_seq = 0;
     };
 
     EngineConfig config;
     asio::io_context io;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> work;
     std::thread thread;
-    udp::socket artnet{io}, sacn{io};
-    asio::steady_timer tick_timer{io}, stats_timer{io};
+    udp::socket artnet{io}, sacn{io}, out{io};
+    asio::steady_timer tick_timer{io}, stats_timer{io}, out_timer{io};
     std::array<std::uint8_t, 1500> artnet_buf{}, sacn_buf{};
     udp::endpoint artnet_from, sacn_from;
     Clock::time_point last_artsync{};
@@ -69,11 +80,24 @@ struct DmxEngine::Impl {
     Pattern pattern = Pattern::off;
     double speed = 1;
     std::vector<GeneratorTarget> targets;
+    std::function<void(std::uint16_t, const Slots &)> tap;
+    OutputConfig out_config;
+    udp::endpoint out_self; // where our output packets come from, so they are never taken as input
+    Cid cid = [] {
+        Cid c;
+        std::random_device rd;
+        for (auto &b : c)
+            b = std::uint8_t(rd());
+        return c;
+    }();
+    std::uint64_t out_packets = 0;
+    std::set<std::uint16_t> out_universes;
 
     mutable std::mutex bus_mutex; // guards the map, not the buffers
     std::map<std::uint16_t, std::unique_ptr<TripleBuffer<UniverseFrame>>> bus;
     mutable std::mutex status_mutex;
     std::map<std::uint16_t, UniverseStatus> status;
+    OutputStatus out_status;
 
     TripleBuffer<UniverseFrame> &buffer(std::uint16_t u) {
         std::lock_guard lock(bus_mutex);
@@ -84,10 +108,28 @@ struct DmxEngine::Impl {
     }
 
     void publish(std::uint16_t u, Universe &uni) {
-        const auto merged = uni.merger.merge();
+        auto merged = uni.merger.merge();
+        auto next_index = std::uint8_t(uni.merger.sources().size());
+        if (uni.playback) {
+            std::bitset<512> recorded;
+            merged.data = mix_playback(merged.data, *uni.playback, &recorded);
+            for (std::size_t i = 0; i < 512; ++i)
+                if (recorded[i])
+                    merged.winner[i] = next_index;
+            ++next_index;
+        }
+        const auto programmer_index = next_index;
+        if (uni.programmer)
+            for (std::size_t i = 0; i < 512; ++i)
+                if (uni.programmer->second[i])
+                    merged.data[i] = uni.programmer->first[i], merged.winner[i] = programmer_index;
         auto &tb = buffer(u);
         tb.back() = {merged.data, ++uni.serial};
         tb.publish();
+        ++published;
+        uni.published = merged.data, uni.out_dirty = true;
+        if (tap)
+            tap(u, merged.data);
         ++uni.frames_this_second;
         std::lock_guard lock(status_mutex);
         UniverseStatus &st = status[u];
@@ -98,6 +140,10 @@ struct DmxEngine::Impl {
         st.sources.clear(), st.source_ids.clear();
         for (auto &s : uni.merger.sources())
             st.sources.push_back(s.name), st.source_ids.push_back(s.id);
+        if (uni.playback)
+            st.sources.push_back("Playback"), st.source_ids.push_back(playback_id);
+        if (uni.programmer)
+            st.sources.push_back("Programmer"), st.source_ids.push_back(programmer_id);
         st.rate_hz = uni.rate_hz, st.lost = uni.lost, st.dropped = uni.dropped;
     }
 
@@ -124,11 +170,25 @@ struct DmxEngine::Impl {
         return true;
     }
 
+    // Our own output coming back (broadcast, multicast loop or a unicast to ourselves) would freeze the merge on
+    // itself.
+    bool own(const udp::endpoint &from) const {
+        return out.is_open() && from.port() == out_self.port() &&
+               (from.address() == out_self.address() || from.address().is_loopback());
+    }
+
     void on_artnet(std::span<const std::uint8_t> p, const udp::endpoint &from) {
+        if (own(from))
+            return;
         const auto packet = parse_artnet(p);
         const std::string ip = from.address().to_string();
         if (std::holds_alternative<ArtPoll>(packet))
             return reply_poll(from);
+        if (const auto *tc = std::get_if<ArtTimeCode>(&packet)) {
+            timecode_ms = tc->ms(), timecode_fps = tc->fps();
+            timecode_at = Clock::now().time_since_epoch().count();
+            return;
+        }
         if (std::holds_alternative<ArtSync>(packet)) {
             // shortcut: ArtSync from any IP releases held frames; Art-Net 4 says only the ArtDmx sender's counts.
             last_artsync = Clock::now();
@@ -163,6 +223,8 @@ struct DmxEngine::Impl {
     }
 
     void on_sacn(std::span<const std::uint8_t> p, const udp::endpoint &from) {
+        if (own(from))
+            return;
         const auto packet = parse_sacn(p);
         if (auto *sync = std::get_if<SacnSync>(&packet)) {
             for (auto &[u, uni] : universes) {
@@ -275,6 +337,92 @@ struct DmxEngine::Impl {
         });
     }
 
+    void apply_output(OutputConfig c) {
+        std::error_code ec;
+        out_timer.cancel();
+        out.close(ec);
+        out_config = std::move(c);
+        std::string error;
+        if (out_config.enabled) {
+            const std::uint16_t port = out_config.port ? out_config.port : out_config.sacn ? sacn_port : artnet_port;
+            try {
+                const auto probe_to =
+                    out_config.target.empty()
+                        ? udp::endpoint(out_config.sacn
+                                            ? asio::ip::address(asio::ip::address_v4(sacn_multicast_group(1)))
+                                            : asio::ip::address(asio::ip::address_v4::broadcast()),
+                                        port)
+                        : udp::endpoint(asio::ip::make_address_v4(out_config.target), port);
+                out.open(udp::v4());
+                out.set_option(asio::socket_base::broadcast(true));
+                if (out_config.sacn && config.sacn_interface != "0.0.0.0")
+                    out.set_option(
+                        asio::ip::multicast::outbound_interface(asio::ip::make_address_v4(config.sacn_interface)));
+                out.bind(udp::endpoint(asio::ip::make_address(config.bind_address), 0)); // ephemeral: see own()
+                out_self = out.local_endpoint();
+                if (out_self.address().is_unspecified()) { // the local address the kernel sends from
+                    udp::socket probe(io, udp::v4());
+                    probe.set_option(asio::socket_base::broadcast(true));
+                    probe.connect(probe_to, ec);
+                    if (!ec)
+                        out_self.address(probe.local_endpoint().address());
+                }
+                for (auto &[_, uni] : universes)
+                    uni.out_dirty = uni.serial > 0;
+                send_output();
+            } catch (const std::system_error &e) {
+                out.close(ec);
+                error = e.what();
+            }
+        }
+        std::lock_guard lock(status_mutex);
+        out_status = {out_config.enabled, 0, 0, error};
+    }
+
+    void send_output() {
+        if (!out.is_open())
+            return;
+        const auto now = Clock::now();
+        const std::uint16_t port = out_config.port ? out_config.port : out_config.sacn ? sacn_port : artnet_port;
+        std::error_code ec, last;
+        for (auto &[u, uni] : universes) {
+            if (uni.serial == 0 || (!uni.out_dirty && now - uni.out_sent < std::chrono::seconds(1)))
+                continue; // nothing published yet, or unchanged and refreshed within the second
+            const int target_u = u + out_config.universe_offset;
+            if (target_u < 1 || target_u > (out_config.sacn ? 63999 : 32768))
+                continue;
+            const auto tu = std::uint16_t(target_u);
+            Bytes packet;
+            asio::ip::address_v4 to;
+            if (out_config.sacn) {
+                packet = make_sacn_data(cid, config.node_name, out_config.priority, uni.out_seq++, tu, uni.published);
+                to = out_config.target.empty() ? asio::ip::address_v4(sacn_multicast_group(tu))
+                                               : asio::ip::make_address_v4(out_config.target, ec);
+            } else {
+                uni.out_seq = std::uint8_t(uni.out_seq % 255 + 1); // 1..255, 0 would switch sequencing off
+                packet = make_artdmx(port_address_from_universe(tu), uni.out_seq, uni.published);
+                to = out_config.target.empty() ? asio::ip::address_v4::broadcast()
+                                               : asio::ip::make_address_v4(out_config.target, ec);
+            }
+            out.send_to(asio::buffer(packet), udp::endpoint(to, port), 0, ec);
+            if (ec)
+                last = ec;
+            else
+                ++out_packets, out_universes.insert(u);
+            uni.out_dirty = false, uni.out_sent = now;
+        }
+        if (last) {
+            std::lock_guard lock(status_mutex);
+            out_status.error = last.message();
+        }
+        out_timer.expires_after(
+            std::chrono::microseconds(std::int64_t(1e6 / std::clamp(out_config.rate_hz, 1.0, 100.0))));
+        out_timer.async_wait([this](std::error_code e) {
+            if (!e)
+                send_output();
+        });
+    }
+
     void run_stats() {
         stats_timer.expires_after(std::chrono::seconds(1));
         stats_timer.async_wait([this](std::error_code ec) {
@@ -284,10 +432,9 @@ struct DmxEngine::Impl {
             for (auto &[u, uni] : universes) {
                 uni.rate_hz = double(uni.frames_this_second);
                 uni.frames_this_second = 0;
-                std::erase_if(uni.last_sequence, [&](auto &kv) {
-                    auto &src = uni.merger.sources();
-                    return std::ranges::find(src, kv.first, &Source::id) == src.end();
-                });
+                auto &src = uni.merger.sources(); // Apple Clang 15 cannot capture the structured binding `uni`
+                std::erase_if(uni.last_sequence,
+                              [&](auto &kv) { return std::ranges::find(src, kv.first, &Source::id) == src.end(); });
                 if (uni.merger.expire(now)) {
                     publish(u, uni);
                 } else {
@@ -295,6 +442,11 @@ struct DmxEngine::Impl {
                     status[u].rate_hz = uni.rate_hz, status[u].lost = uni.lost, status[u].dropped = uni.dropped;
                 }
             }
+            {
+                std::lock_guard lock(status_mutex);
+                out_status.packets_per_s = double(out_packets), out_status.universes = out_universes.size();
+            }
+            out_packets = 0, out_universes.clear();
             run_stats();
         });
     }
@@ -350,6 +502,8 @@ void DmxEngine::start() {
     }
     m.run_tick();
     m.run_stats();
+    if (m.out_config.enabled) // reopened after a stop()
+        asio::post(m.io, [&m] { m.apply_output(m.out_config); });
     m.io.restart();
     m.work.emplace(m.io.get_executor());
     m.thread = std::thread([&m] { m.io.run(); });
@@ -365,8 +519,10 @@ void DmxEngine::stop() {
     std::error_code ec;
     m.artnet.close(ec);
     m.sacn.close(ec);
+    m.out.close(ec);
     m.tick_timer.cancel();
     m.stats_timer.cancel();
+    m.out_timer.cancel();
 }
 
 void DmxEngine::subscribe(std::vector<std::uint16_t> list) {
@@ -425,6 +581,46 @@ void DmxEngine::set_generator(Pattern pattern, double speed, std::vector<Generat
                 if (uni.merger.remove(generator_id))
                     m.publish(u, uni);
     });
+}
+
+void DmxEngine::set_playback(std::uint16_t universe, std::optional<PlaybackMix> mix) {
+    asio::post(impl_->io, [&m = *impl_, universe, mix = std::move(mix)]() mutable {
+        if (auto it = m.universes.find(universe); it != m.universes.end()) {
+            it->second.playback = std::move(mix);
+            m.publish(universe, it->second);
+        }
+    });
+}
+
+void DmxEngine::set_output(OutputConfig config) {
+    asio::post(impl_->io, [&m = *impl_, config = std::move(config)]() mutable { m.apply_output(std::move(config)); });
+}
+
+std::uint64_t DmxEngine::publish_serial() const { return impl_->published; }
+
+Timecode DmxEngine::timecode() const {
+    const auto age = Clock::now() - Clock::time_point(Clock::duration(impl_->timecode_at.load()));
+    if (impl_->timecode_ms < 0 || age > std::chrono::seconds(1))
+        return {};
+    return {impl_->timecode_ms, impl_->timecode_fps};
+}
+
+OutputStatus DmxEngine::output_status() const {
+    std::lock_guard lock(impl_->status_mutex);
+    return impl_->out_status;
+}
+
+void DmxEngine::set_programmer(std::uint16_t universe, std::optional<std::pair<Slots, std::bitset<512>>> programmer) {
+    asio::post(impl_->io, [&m = *impl_, universe, programmer] {
+        if (auto it = m.universes.find(universe); it != m.universes.end()) {
+            it->second.programmer = programmer;
+            m.publish(universe, it->second);
+        }
+    });
+}
+
+void DmxEngine::set_tap(std::function<void(std::uint16_t, const Slots &)> tap) {
+    asio::post(impl_->io, [&m = *impl_, tap = std::move(tap)]() mutable { m.tap = std::move(tap); });
 }
 
 TripleBuffer<UniverseFrame> *DmxEngine::frames(std::uint16_t universe) { return &impl_->buffer(universe); }

@@ -24,7 +24,7 @@ json new_project() {
         {"app", {{"name", "Scene Visualiser"}, {"version", "0.2.0"}}},
         {"units", "m"}, // UI display unit; numbers in the file are always metres
         {"venue",
-         {{"width", 20.0}, {"depth", 15.0}, {"height", 8.0}, {"decks", json::array()}, {"geometry", json::array()}}},
+         {{"width", 20.0}, {"depth", 15.0}, {"height", 8.0}, {"geometry", json::array()}}},
         {"objects", json::array()},
         {"patch", {{"universes", json::array()}}},
         {"composition",
@@ -46,12 +46,22 @@ void migrate(json &project) {
             if (!project.contains(key))
                 project[key] = json::array();
     }
+    if (project.value("schemaVersion", 0) < 3 && project.contains("venue") && project["venue"].contains("decks")) {
+        json &objects = project["objects"];
+        if (!objects.is_array())
+            objects = json::array();
+        int n = 0;
+        for (const json &d : project["venue"]["decks"]) {
+            json o = new_deck(d.value("width", 4.0), d.value("depth", 2.0), d.value("height", 1.0));
+            o["name"] = "Deck " + std::to_string(++n);
+            for (const char *key : {"uuid", "position"})
+                if (d.contains(key))
+                    o[key] = d[key];
+            objects.insert(objects.begin() + (n - 1), o); // decks drew first; keep them first
+        }
+        project["venue"].erase("decks");
+    }
     project["schemaVersion"] = schema_version;
-}
-
-json new_deck(double width, double depth, double height) {
-    return {
-        {"uuid", new_uuid()}, {"position", {0.0, 0.0, 0.0}}, {"width", width}, {"depth", depth}, {"height", height}};
 }
 
 static json new_object(const char *type, std::string name) {
@@ -137,12 +147,25 @@ json new_camera(std::string name) {
     return o;
 }
 
+json new_deck(double width, double depth, double height) {
+    json o = new_object("deck", "Deck");
+    o["width"] = width, o["depth"] = depth, o["height"] = height;
+    return o;
+}
+
+json new_shape(std::string name, std::string shape, double width, double height, double depth) {
+    json o = new_object("shape", std::move(name));
+    o["shape"] = std::move(shape);
+    o["size"] = {width, height, depth};
+    o["color"] = "#6b7080";
+    return o;
+}
+
 json demo_project() {
     json p = new_project();
     p["venue"]["width"] = 16.0, p["venue"]["depth"] = 12.0;
-    json deck = new_deck(10, 6, 1);
-    p["venue"]["decks"].push_back(deck);
     auto &objects = p["objects"];
+    objects.push_back(new_deck(10, 6, 1));
     auto truss = [&](const char *name, double z) {
         json t = new_truss(name, "straight", 10);
         t["position"] = {0.0, 6.5, z};

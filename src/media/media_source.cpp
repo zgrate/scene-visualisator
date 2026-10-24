@@ -5,6 +5,7 @@
 
 #include <QDateTime>
 #include <QGuiApplication>
+#include <QMediaFormat>
 #include <QScreen>
 #include <QUrl>
 #include <QVideoFrame>
@@ -99,8 +100,60 @@ void MediaSource::store(QImage image) {
         fps_ = fps_ ? fps_ * 0.9 + 100.0 / double(now - last_ms_) : 1000.0 / double(now - last_ms_);
     last_ms_ = now;
     arrived_ms_ = now;
-    image_ = std::move(image);
+    image_ = image;
     ++serial_;
+    lock.unlock();
+    if (recording_) // the recorder lives on the UI thread
+        QMetaObject::invokeMethod(this, [this, image = std::move(image)] { record_frame(image); });
+}
+
+QString MediaSource::start_recording(const QString &path, bool lossless) {
+    stop_recording();
+    rec_session_ = std::make_unique<QMediaCaptureSession>();
+    rec_input_ = std::make_unique<QVideoFrameInput>();
+    recorder_ = std::make_unique<QMediaRecorder>();
+    QMediaFormat format(QMediaFormat::MPEG4);
+    format.setVideoCodec(QMediaFormat::VideoCodec::H264);
+    recorder_->setMediaFormat(format);
+    recorder_->setOutputLocation(QUrl::fromLocalFile(path));
+    if (lossless) {
+        recorder_->setQuality(QMediaRecorder::VeryHighQuality);
+        recorder_->setEncodingMode(QMediaRecorder::ConstantBitRateEncoding);
+        recorder_->setVideoBitRate(150'000'000);
+    } else {
+        recorder_->setQuality(QMediaRecorder::HighQuality);
+    }
+    connect(recorder_.get(), &QMediaRecorder::errorOccurred, this,
+            [this](QMediaRecorder::Error, const QString &e) { error_ = tr("Recording: %1").arg(e); });
+    rec_session_->setVideoFrameInput(rec_input_.get());
+    rec_session_->setRecorder(recorder_.get());
+    recorder_->record();
+    rec_clock_.start();
+    recording_ = true;
+    return recorder_->error() == QMediaRecorder::NoError ? QString() : recorder_->errorString();
+}
+
+void MediaSource::stop_recording() {
+    recording_ = false;
+    if (!recorder_)
+        return;
+    recorder_->stop(); // finalises the file
+    recorder_.reset();
+    rec_input_.reset();
+    rec_session_.reset();
+}
+
+void MediaSource::record_frame(const QImage &image) {
+    if (!recorder_ || image.isNull())
+        return;
+    QVideoFrame frame(image);
+    frame.setStartTime(rec_clock_.nsecsElapsed() / 1000);
+    rec_input_->sendVideoFrame(frame); // false while the encoder is busy: the frame is dropped, timestamps keep sync
+}
+
+quint64 MediaSource::serial() const {
+    QMutexLocker lock(&mutex_);
+    return serial_;
 }
 
 QImage MediaSource::latest(quint64 &serial) const {

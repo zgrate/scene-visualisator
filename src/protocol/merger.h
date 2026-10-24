@@ -55,4 +55,15 @@ class UniverseMerger {
     std::uint64_t serial_ = 0;
 };
 
+// Show playback mixed into the live merge per slot (live -> recording by `weight`).
+struct PlaybackMix {
+    Slots frame{};                          // the recording's state
+    std::array<std::uint8_t, 512> weight{}; // 0 = live, 255 = recording, between = crossfade
+    std::bitset<512> snap;                  // switches at 128 instead of fading: wheels, control, unpatched slots
+    std::bitset<512> htp;                   // max(live, recording) instead of the weight
+    std::bitset<512> fine;                  // the fine byte of the slot before it: faded as one 16-bit value
+};
+// The mixed slots; `from_recording` (optional) marks the slots the recording decides.
+Slots mix_playback(const Slots &live, const PlaybackMix &mix, std::bitset<512> *from_recording = nullptr);
+
 } // namespace sv::proto

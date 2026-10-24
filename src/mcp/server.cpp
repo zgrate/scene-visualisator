@@ -398,7 +398,14 @@ Response Server::handle(const Request &request) {
         const auto start = Clock::now();
         json result;
         try {
-            result = it->run(call.arguments.is_object() ? call.arguments : json::object());
+            if (!call.arguments.is_object())
+                call.arguments = json::object();
+            // A plain error for a missing required argument, not nlohmann's out_of_range text from args.at().
+            if (const auto req = it->input_schema.find("required"); req != it->input_schema.end() && req->is_array())
+                for (const json &k : *req)
+                    if (k.is_string() && !call.arguments.contains(k.get<std::string>()))
+                        throw std::invalid_argument("Missing argument: " + k.get<std::string>());
+            result = it->run(call.arguments);
         } catch (const std::exception &e) {
             call.ok = false, call.error = e.what();
             result = {{"content", json::array({{{"type", "text"}, {"text", e.what()}}})}, {"isError", true}};

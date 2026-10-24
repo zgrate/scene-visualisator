@@ -34,5 +34,6 @@ void main() {
     float spread = 1.0 / (1.0 + 0.6 * R);
     float falloff = mix(1.0, 0.45, s / len) * (1.0 - smoothstep(len * 0.97, len, s));
     float hot = 1.0 + 2.0 * exp(-s * 2.0); // bright near the lens
-    frag = vec4(v_colour.rgb * profile * spread * falloff * hot * (0.15 + floor_info.z), 0.0);
+    // Clamped for the screen blend, which needs a source within 0..1.
+    frag = vec4(min(v_colour.rgb * profile * spread * falloff * hot * (0.15 + floor_info.z), vec3(1.0)), 0.0);
 }

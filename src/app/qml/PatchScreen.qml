@@ -78,6 +78,13 @@ Rectangle {
                 enabled: Session.selectionCount > 0 && start.text !== ""
                 onClicked: sheet.message = Session.readdressSelection(start.text)
             }
+            HudButton {
+                readonly property bool on: Session.selectedUuids.some(u => Session.located.includes(u))
+                text: qsTr("Locate")
+                active: on
+                enabled: Session.selectionCount > 0
+                onClicked: Session.locate(Session.selectedUuids, !on)
+            }
         }
         Label {
             visible: sheet.message !== ""

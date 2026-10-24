@@ -3,13 +3,17 @@
 // thread; frames land in a mutex-guarded latest-wins slot that the render thread polls by serial.
 #include <QImage>
 #include <QMediaCaptureSession>
+#include <QElapsedTimer>
 #include <QMediaPlayer>
+#include <QMediaRecorder>
+#include <QVideoFrameInput>
 #include <QMutex>
 #include <QObject>
 #include <QScreenCapture>
 #include <QVideoSink>
 #include <QWindowCapture>
 
+#include <atomic>
 #include <memory>
 
 namespace sv::media {
@@ -36,9 +40,17 @@ class MediaSource : public QObject {
     void open(const QString &kind, const QString &target);
     void set_playback(bool playing, bool loop, double rate); // video only
     bool active() const { return !kind_.isEmpty(); }
+    qint64 position_ms() const { return player_.position(); } // video only
+    void seek(qint64 ms) { player_.setPosition(ms); }           // video only
+
+    // Records every frame that arrives from now on to an H.264 MP4 at `path`. lossless picks near-lossless
+    // (150 Mbit/s constant bitrate) over the encoder's high quality. Returns an error, empty on success.
+    QString start_recording(const QString &path, bool lossless);
+    void stop_recording();
 
     // Render-thread safe. The latest frame when newer than `serial` (which is then advanced), else a null image.
     QImage latest(quint64 &serial) const;
+    quint64 serial() const; // any thread; advances with every frame, without taking it
     MediaStatus status() const;
 
     // What `open` accepts for a kind: screen names, window titles or sender names; empty for other kinds. NDI blocks
@@ -48,6 +60,7 @@ class MediaSource : public QObject {
   private:
     void on_frame(const QVideoFrame &frame);
     void store(QImage image); // any thread
+    void record_frame(const QImage &image);
 
     QString kind_;
     QMediaPlayer player_;
@@ -58,6 +71,11 @@ class MediaSource : public QObject {
     QString error_;
     std::unique_ptr<NdiReceiver> ndi_;
     std::unique_ptr<NativeReceiver> native_; // Spout or Syphon
+    std::unique_ptr<QMediaCaptureSession> rec_session_;
+    std::unique_ptr<QVideoFrameInput> rec_input_;
+    std::unique_ptr<QMediaRecorder> recorder_;
+    QElapsedTimer rec_clock_;
+    std::atomic_bool recording_{false}; // read by store() on receiver threads
 
     mutable QMutex mutex_;
     QImage image_;

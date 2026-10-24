@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import SceneVisualiser
 
 // Studio posture (design 2), dark: the 3D view is the page; a slim icon rail, floating Objects and Inspector
-// cards, and a DMX meter dock. Patch, DMX and Project screens replace the viewport area; the viewport stays alive.
+// cards, and a DMX meter dock. Patch, DMX and Project screens replace the viewport area; the viewport is paused under them.
 ApplicationWindow {
     id: win
     width: 1440
@@ -38,6 +38,9 @@ ApplicationWindow {
     }
 
     property string screen: "design"
+    property bool build: false // Build palette card on the design screen
+    property bool view3d: true // title-bar 3D switch; per session, so a restart never opens on a paused view
+    property bool keysCard: false // the keyboard card, toggled by ? or F1
     property int dockUniverse: Session.universes.length ? Session.universes[0] : 1
 
     function rate(v) { return v < 0 ? "—" : Math.round(v) + " Hz" }
@@ -76,15 +79,17 @@ ApplicationWindow {
     Shortcut { sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; onActivated: Session.redo() }
     Shortcut { sequences: [StandardKey.Delete, "Backspace"]; onActivated: Session.deleteSelection() }
     Shortcut { sequence: "Ctrl+D"; onActivated: Session.duplicateSelection() }
-    Shortcut { sequence: "Escape"; onActivated: Session.selectUuid("", false) }
-    // Arrows nudge 0.25 m on the floor plane (Up = upstage, -Z); Page Up/Down raise and lower. Off while typing.
+    Shortcut { sequence: "Escape"; onActivated: palette.tool ? palette.finish() : Session.selectUuid("", false) }
+    // Alt+arrows nudge 0.25 m on the floor plane (Up = upstage, -Z); Alt+Page Up/Down raise and lower. Off while
+    // typing. Plain arrows drive the 3D view's camera (view_keys.h).
     readonly property bool typing: activeFocusItem instanceof TextInput
-    Shortcut { sequence: "Left"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(-0.25, 0, 0) }
-    Shortcut { sequence: "Right"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0.25, 0, 0) }
-    Shortcut { sequence: "Up"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0, -0.25) }
-    Shortcut { sequence: "Down"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0, 0.25) }
-    Shortcut { sequence: "PgUp"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0.25, 0) }
-    Shortcut { sequence: "PgDown"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, -0.25, 0) }
+    Shortcut { sequence: "Alt+Left"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(-0.25, 0, 0) }
+    Shortcut { sequence: "Alt+Right"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0.25, 0, 0) }
+    Shortcut { sequence: "Alt+Up"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0, -0.25) }
+    Shortcut { sequence: "Alt+Down"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0, 0.25) }
+    Shortcut { sequence: "Alt+PgUp"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, 0.25, 0) }
+    Shortcut { sequence: "Alt+PgDown"; enabled: !win.typing && win.screen !== "mapping"; onActivated: Session.nudgeSelection(0, -0.25, 0) }
+    Shortcut { sequences: ["?", "Shift+?", "F1"]; enabled: !win.typing; onActivated: win.keysCard = !win.keysCard }
     Shortcut { sequences: [StandardKey.Open]; onActivated: project.open() }
     Shortcut { sequences: [StandardKey.Save]; onActivated: project.save() }
     Shortcut { sequences: [StandardKey.SaveAs, "Ctrl+Shift+S"]; onActivated: project.saveAs() }
@@ -103,7 +108,7 @@ ApplicationWindow {
                 font.pixelSize: Theme.fontSize
             }
             Repeater {
-                model: [["design", qsTr("Design")], ["patch", qsTr("Patch")], ["dmx", qsTr("DMX")], ["plan", qsTr("Plan")], ["mapping", qsTr("Mapping")]]
+                model: [["design", qsTr("Design")], ["patch", qsTr("Patch")], ["dmx", qsTr("DMX")], ["control", qsTr("Control")], ["plan", qsTr("Plan")], ["mapping", qsTr("Mapping")]]
                 Label {
                     required property var modelData
                     text: modelData[1]
@@ -114,6 +119,29 @@ ApplicationWindow {
                 }
             }
             Item { Layout.fillWidth: true }
+            Label { // the light-control programmer holds fixtures over live input
+                visible: Object.keys(Session.programmer).length > 0
+                text: qsTr("PROG")
+                color: Theme.warn
+                font.bold: true
+                font.pixelSize: Theme.small + 1
+                TapHandler { onTapped: win.screen = "control" }
+            }
+            Label { // 3D switch: off pauses the viewport so plan editing or playback costs no GPU
+                text: qsTr("3D")
+                color: win.view3d ? Theme.accent : Theme.muted
+                font.bold: true
+                font.pixelSize: Theme.small + 1
+                TapHandler { onTapped: win.view3d = !win.view3d }
+            }
+            Label { // signal output (proxy): live input, or the take where its scopes say so
+                visible: Session.outputStatus.enabled === true
+                text: Session.recording.playing ? qsTr("OUT REC") : qsTr("OUT")
+                color: Session.outputStatus.error ? Theme.err : Theme.accent
+                font.bold: true
+                font.pixelSize: Theme.small + 1
+                TapHandler { onTapped: win.screen = "project" }
+            }
             Repeater {
                 model: [["Art-Net", Session.dmxStatus.artnet], ["sACN", Session.dmxStatus.sacn]]
                 Label {
@@ -190,12 +218,29 @@ ApplicationWindow {
                 flat: true
                 font.family: Theme.mono
                 font.pixelSize: Theme.small + 1
+                readonly property var fed: Session.feedStatus.filter(f => f.feedKind)
+                readonly property int fedLive: fed.filter(f => f.signal).length
                 text: qsTr("MEDIA") + " · " + (names[st.kind] || st.kind) + (!st.live ? ""
                       : st.signal ? " · %1×%2 · %3 fps".arg(st.width).arg(st.height).arg(st.fps.toFixed(1))
                       : " · " + qsTr("No signal"))
-                palette.buttonText: st.live && !st.signal ? Theme.warn : Theme.muted
+                      + (fed.length ? " · " + qsTr("%1/%2 outputs").arg(fedLive).arg(fed.length) : "")
+                palette.buttonText: (st.live && !st.signal) || fedLive < fed.length ? Theme.warn : Theme.muted
                 onClicked: media.open()
                 MediaCard { id: media; y: -height - 10; x: parent.width - width }
+            }
+            Rectangle { width: 1; Layout.fillHeight: true; color: Theme.line }
+            Button {
+                readonly property var rec: Session.recording
+                implicitHeight: 24
+                flat: true
+                font.family: Theme.mono
+                font.pixelSize: Theme.small + 1
+                text: rec.active ? "● " + recordCard.clock(rec.t)
+                      : rec.playing ? "▶ " + recordCard.clock(rec.t) + " / " + recordCard.clock(rec.duration)
+                      : qsTr("REC")
+                palette.buttonText: rec.active ? Theme.err : rec.playing ? Theme.accent : Theme.muted
+                onClicked: recordCard.open()
+                RecordCard { id: recordCard; y: -height - 10; x: parent.width - width }
             }
         }
     }
@@ -212,13 +257,24 @@ ApplicationWindow {
             spacing: 6
             Repeater {
                 model: [["design", qsTr("Design")], ["patch", qsTr("Patch sheet")], ["dmx", qsTr("DMX monitor")],
-                        ["plan", qsTr("Plan and elevation")], ["mapping", qsTr("Mapping")], ["project", qsTr("Project")]]
+                        ["control", qsTr("Light control")], ["plan", qsTr("Plan and elevation")], ["mapping", qsTr("Mapping")], ["project", qsTr("Project")]]
                 RailButton {
                     required property var modelData
                     text: modelData[1]
                     icon.source: "icons/" + modelData[0] + ".svg"
                     active: win.screen === modelData[0]
                     onClicked: win.screen = modelData[0]
+                }
+            }
+            Rectangle { width: 20; height: 1; color: Theme.line; anchors.horizontalCenter: parent.horizontalCenter }
+            RailButton {
+                text: qsTr("Build")
+                icon.source: "icons/build.svg"
+                active: win.build && win.screen === "design"
+                onClicked: {
+                    win.build = !(win.build && win.screen === "design")
+                    win.screen = "design"
+                    if (!win.build) palette.finish()
                 }
             }
         }
@@ -232,12 +288,64 @@ ApplicationWindow {
             id: viewport
             objectName: "viewport" // found by the AI screenshot and camera tools
             anchors.fill: parent
+            keys: win.screen === "design" // other screens cover it; its single-key commands stay off there
+            visible: win.view3d && win.screen === "design" // paused (no GPU work) while covered or switched off
+        }
+        Rectangle {
+            visible: !win.view3d && win.screen === "design"
+            anchors.centerIn: parent
+            width: pausedText.implicitWidth + 24
+            height: pausedText.implicitHeight + 16
+            radius: Theme.radius
+            color: Theme.panel
+            border.color: Theme.line
+            Label {
+                id: pausedText
+                anchors.centerIn: parent
+                text: qsTr("3D view paused · click to resume")
+                color: Theme.muted
+                font.pixelSize: Theme.fontSize
+            }
+            TapHandler { onTapped: win.view3d = true }
+        }
+        // Modal transform readout ("Move X: 1.25 m"), top centre while G/R/S or a gizmo drag runs.
+        Rectangle {
+            visible: viewport.transformHint !== ""
+            anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: Theme.gap }
+            width: hintText.implicitWidth + 16
+            height: hintText.implicitHeight + 8
+            radius: 4
+            color: Theme.panel
+            border.color: Theme.line
+            Label {
+                id: hintText
+                anchors.centerIn: parent
+                text: viewport.transformHint
+                color: Theme.fg
+                font.family: Theme.mono
+                font.pixelSize: Theme.fontSize
+            }
+        }
+
+        // Fly and walk: what the keys do until the right button is released or walk ends.
+        Label {
+            visible: viewport.flying !== "" && win.screen === "design"
+            anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; margins: Theme.gap }
+            z: 1
+            padding: 6
+            text: (viewport.flying === "walk" ? qsTr("WALK · Enter keeps · Esc goes back") : qsTr("FLY"))
+                  + qsTr(" · WASD move · Q E down, up · Shift fast · Alt slow · wheel speed")
+            color: Theme.fg
+            font.family: Theme.mono
+            font.pixelSize: Theme.small + 1
+            background: Rectangle { color: Theme.panel; border.color: Theme.accent; radius: Theme.radius }
         }
 
         // Debug mode HUD: renderer, DMX input, media and AI access at a glance.
         Rectangle {
             visible: Session.debugMode && win.screen === "design"
-            anchors { left: parent.left; bottom: viewLabel.top; margins: Theme.gap }
+            anchors { right: parent.right; bottom: viewButtons.top; margins: Theme.gap }
+            z: 1 // above the cards, which are declared later
             width: hud.implicitWidth + 16
             height: hud.implicitHeight + 12
             color: Theme.panel
@@ -254,8 +362,8 @@ ApplicationWindow {
                 text: [
                     "DEBUG",
                     "%1 fps · cpu %2 ms".arg((r.fps || 0).toFixed(1)).arg((r.cpuMs || 0).toFixed(2)),
-                    "boxes %1 · beams %2 · walls %3 · meshes %4".arg(r.boxes || 0).arg(r.beams || 0)
-                        .arg(r.walls || 0).arg(r.meshes || 0),
+                    "boxes %1 · beams %2 (%5 fixtures) · walls %3 · meshes %4".arg(r.boxes || 0).arg(r.beams || 0)
+                        .arg(r.walls || 0).arg(r.meshes || 0).arg(r.beamFixtures || 0),
                     (r.backend || "?") + " · " + (r.device || "").slice(0, 40)
                 ].concat(Object.keys(d.perUniverse || {}).map(u => {
                     const p = d.perUniverse[u]
@@ -284,6 +392,7 @@ ApplicationWindow {
             font.pixelSize: Theme.small + 1
         }
         Row {
+            id: viewButtons
             visible: win.screen === "design"
             anchors { right: parent.right; bottom: parent.bottom; margins: Theme.gap }
             spacing: 4
@@ -317,6 +426,13 @@ ApplicationWindow {
                 }
             }
             HudButton {
+                text: "?"
+                active: win.keysCard
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Keyboard (? or F1)")
+                onClicked: win.keysCard = !win.keysCard
+            }
+            HudButton {
                 text: "+"
                 ToolTip.visible: hovered
                 ToolTip.text: qsTr("Bookmark this camera")
@@ -341,6 +457,34 @@ ApplicationWindow {
                 defaultX: cards.width - width
                 Inspector {}
             }
+            Card {
+                key: "keys"
+                title: qsTr("Keyboard · %1").arg(Session.controls === "maya" ? "Maya" : "Blender")
+                visible: win.keysCard
+                width: 330
+                defaultX: cards.width - width - 290
+                KeysCard { rows: (Session.controls, viewport.keyHelp()) }
+            }
+            Card {
+                key: "palette"
+                title: qsTr("Build")
+                visible: win.build
+                defaultX: 270
+                Palette { id: palette; viewport: viewport; onWizard: win.guarded(() => wizard.open()) }
+            }
+        }
+
+        // Palette tiles dropped on the view land on the floor under the cursor.
+        DropArea {
+            anchors.fill: parent
+            enabled: win.screen === "design"
+            keys: ["application/x-sv-palette"]
+            onDropped: drop => {
+                const p = viewport.floorPoint(drop.x, drop.y)
+                if (!p.length) return
+                drop.accept(Qt.CopyAction)
+                palette.place(JSON.parse(drop.getDataAsString("application/x-sv-palette")), p[0], p[2])
+            }
         }
 
         ProjectScreen {
@@ -349,7 +493,9 @@ ApplicationWindow {
             anchors.fill: parent
             guard: win.guarded
             onProblem: win.screen = "project"
+            onWizard: win.guarded(() => wizard.open())
         }
+        NewProjectWizard { id: wizard; onBuilt: win.screen = "design" }
 
         PatchScreen {
             visible: win.screen === "patch"
@@ -358,6 +504,11 @@ ApplicationWindow {
 
         DmxScreen {
             visible: win.screen === "dmx"
+            anchors.fill: parent
+        }
+
+        ControlScreen {
+            visible: win.screen === "control"
             anchors.fill: parent
         }
 
@@ -374,6 +525,7 @@ ApplicationWindow {
 
     DropArea {
         anchors.fill: parent
+        keys: ["text/uri-list"]
         onDropped: drop => { if (drop.hasUrls) { drop.accept(Qt.CopyAction); win.openFiles(drop.urls) } }
     }
 

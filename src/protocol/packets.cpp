@@ -9,7 +9,8 @@ namespace {
 
 constexpr char artnet_id[8] = {'A', 'r', 't', '-', 'N', 'e', 't', 0};
 constexpr std::uint8_t acn_id[12] = {'A', 'S', 'C', '-', 'E', '1', '.', '1', '7', 0, 0, 0};
-constexpr std::uint16_t op_poll = 0x2000, op_poll_reply = 0x2100, op_dmx = 0x5000, op_sync = 0x5200;
+constexpr std::uint16_t op_poll = 0x2000, op_poll_reply = 0x2100, op_dmx = 0x5000, op_sync = 0x5200,
+                        op_timecode = 0x9700;
 constexpr std::uint32_t vector_root_data = 4, vector_root_extended = 8, vector_frame_data = 2, vector_sync = 1;
 
 std::uint16_t be16(const std::uint8_t *p) { return std::uint16_t(p[0] << 8 | p[1]); }
@@ -47,6 +48,11 @@ ArtNetPacket parse_artnet(std::span<const std::uint8_t> p) {
         return ArtPoll{};
     if (op == op_sync)
         return ArtSync{};
+    if (op == op_timecode) {
+        if (p.size() < 19 || p[14] > 29 || p[15] > 59 || p[16] > 59 || p[17] > 23 || p[18] > 3)
+            return {};
+        return ArtTimeCode{p[14], p[15], p[16], p[17], p[18]};
+    }
     if (op != op_dmx || p.size() < 18)
         return {};
     const std::size_t length = std::min<std::size_t>({be16(&p[16]), 512, p.size() - 18});
@@ -101,6 +107,13 @@ Bytes make_artdmx(std::uint16_t port_address, std::uint8_t sequence, std::span<c
 Bytes make_artsync() {
     Bytes b = artnet_header(14, op_sync);
     b[11] = 14;
+    return b;
+}
+
+Bytes make_arttimecode(const ArtTimeCode &tc) {
+    Bytes b = artnet_header(19, op_timecode);
+    b[11] = 14;
+    b[14] = tc.frames, b[15] = tc.seconds, b[16] = tc.minutes, b[17] = tc.hours, b[18] = tc.type;
     return b;
 }
 

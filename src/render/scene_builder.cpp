@@ -26,6 +26,18 @@ QVector3D vec3(const json &j, QVector3D fallback = {}) {
     return {j[0].get<float>(), j[1].get<float>(), j[2].get<float>()};
 }
 
+// A strings wall's `facing`: down, up, front (the audience, +Z), back, left (−X) or right (+X); anything else is
+// all round (zero).
+QVector3D string_facing(const std::string &f) {
+    return f == "down"    ? QVector3D(0, -1, 0)
+           : f == "up"    ? QVector3D(0, 1, 0)
+           : f == "front" ? QVector3D(0, 0, 1)
+           : f == "back"  ? QVector3D(0, 0, -1)
+           : f == "left"  ? QVector3D(-1, 0, 0)
+           : f == "right" ? QVector3D(1, 0, 0)
+                          : QVector3D();
+}
+
 QVector4D tinted(QVector4D c, bool selected) {
     return selected ? QVector4D(c.toVector3D() * 0.4f + accent * 0.6f, c.w()) : c;
 }
@@ -41,10 +53,67 @@ QMatrix4x4 local_transform(const json &o) {
     return m;
 }
 
+bool hit_unit_box(const QMatrix4x4 &model, QVector3D origin, QVector3D dir, float &t_out);
+
+bool inside_unit_box(const QMatrix4x4 &model, QVector3D p) {
+    bool invertible = false;
+    const QVector3D l = model.inverted(&invertible).map(p);
+    return invertible && std::abs(l.x()) <= 0.5f && std::abs(l.y()) <= 0.5f && std::abs(l.z()) <= 0.5f;
+}
+
 QMatrix4x4 box(const QMatrix4x4 &parent, QVector3D centre, QVector3D size) {
     QMatrix4x4 m = parent;
     m.translate(centre);
     m.scale(size);
+    return m;
+}
+
+// Unit primitives for `shape` objects, centred in [-0.5, 0.5]^3, flat normals. Built once, so the GPU buffer is too.
+void add_triangle(std::vector<float> &v, QVector3D a, QVector3D b, QVector3D c) {
+    const QVector3D n = QVector3D::normal(a, b, c);
+    for (const QVector3D &p : {a, b, c})
+        v.insert(v.end(), {p.x(), p.y(), p.z(), n.x(), n.y(), n.z()});
+}
+
+std::shared_ptr<const Mesh> unit_cylinder() {
+    static const auto mesh = [] {
+        std::vector<float> v;
+        constexpr int segments = 24;
+        for (int i = 0; i < segments; ++i) {
+            const float a0 = 2 * std::numbers::pi_v<float> * float(i) / segments,
+                        a1 = 2 * std::numbers::pi_v<float> * float(i + 1) / segments;
+            const QVector3D p0(0.5f * std::cos(a0), 0, -0.5f * std::sin(a0)),
+                p1(0.5f * std::cos(a1), 0, -0.5f * std::sin(a1)), up(0, 0.5f, 0);
+            add_triangle(v, p0 - up, p1 - up, p1 + up);
+            add_triangle(v, p0 - up, p1 + up, p0 + up);
+            add_triangle(v, up, p0 + up, p1 + up);
+            add_triangle(v, -up, p1 - up, p0 - up);
+        }
+        return make_mesh(std::move(v));
+    }();
+    return mesh;
+}
+
+std::shared_ptr<const Mesh> unit_wedge() {
+    static const auto mesh = [] {
+        std::vector<float> v;
+        const QVector3D a(-0.5f, -0.5f, -0.5f), b(0.5f, -0.5f, -0.5f), c(0.5f, -0.5f, 0.5f), d(-0.5f, -0.5f, 0.5f),
+            e(-0.5f, 0.5f, -0.5f), f(0.5f, 0.5f, -0.5f);    // top edge along X at the back (-Z)
+        add_triangle(v, a, c, b), add_triangle(v, a, d, c); // bottom
+        add_triangle(v, a, b, f), add_triangle(v, a, f, e); // back
+        add_triangle(v, d, e, f), add_triangle(v, d, f, c); // slope
+        add_triangle(v, a, e, d), add_triangle(v, b, c, f); // sides
+        return make_mesh(std::move(v));
+    }();
+    return mesh;
+}
+
+QMatrix4x4 world_of(const json &o, const std::map<std::string, const json *> &by_uuid, int depth = 0) {
+    QMatrix4x4 m = local_transform(o);
+    const json &parent = o.value("parent", json());
+    if (parent.is_string() && depth < 16)
+        if (auto it = by_uuid.find(parent.get<std::string>()); it != by_uuid.end())
+            return world_of(*it->second, by_uuid, depth + 1) * m;
     return m;
 }
 
@@ -57,26 +126,60 @@ struct Builder {
     RenderScene scene;
     std::map<std::string, const json *> by_uuid;
 
-    QMatrix4x4 world(const json &o, int depth = 0) {
-        QMatrix4x4 m = local_transform(o);
-        const json &parent = o.value("parent", json());
-        if (parent.is_string() && depth < 16)
-            if (auto it = by_uuid.find(parent.get<std::string>()); it != by_uuid.end())
-                return world(*it->second, depth + 1) * m;
-        return m;
-    }
+    QMatrix4x4 world(const json &o) { return world_of(o, by_uuid); }
+
+    struct PendingBeam {
+        QVector3D origin, dir;
+        float tan_half;
+        QVector3D colour;
+        int owner;
+    };
+    std::vector<PendingBeam> pending;
+    int current_owner = -1;
+    float venue_height = 8;
 
     void add_beam(QVector3D origin, QVector3D dir, float beam_angle, QVector3D colour) {
         if (colour.length() < 0.004f)
             return;
-        const float tan_half = std::tan(std::clamp(beam_angle, 0.5f, 120.0f) * deg / 2);
-        float length = 25;
-        if (dir.y() < -1e-3f && origin.y() > 0) {
-            length = std::min(origin.y() / -dir.y(), 40.0f);
-            const QVector3D hit = origin + dir * length;
-            scene.spots.push_back({{hit.x(), hit.z()}, length * tan_half, colour});
+        pending.push_back(
+            {origin, dir, std::tan(std::clamp(beam_angle, 0.5f, 120.0f) * deg / 2), colour, current_owner});
+    }
+
+    // Beams end on the floor, at the venue height or on the first deck, shape, screen or set piece in their way.
+    // shortcut: only a mostly downward beam leaves a pool of light; walls hit sideways get none.
+    void resolve_beams() {
+        std::vector<std::pair<const PickBox *, const char *>> solid;
+        for (const PickBox &p : scene.pick)
+            if (const auto it = by_uuid.find(p.uuid); it != by_uuid.end()) {
+                const std::string t = it->second->value("type", std::string());
+                for (const char *kind : {"deck", "shape", "ledWall", "setPiece"})
+                    if (t == kind)
+                        solid.push_back({&p, kind});
+            }
+        for (const PendingBeam &b : pending) {
+            float length = 25;
+            bool pool = false;
+            const char *hit = "none";
+            if (b.dir.y() < -1e-3f && b.origin.y() > 0) {
+                length = b.origin.y() / -b.dir.y(), pool = true, hit = "floor";
+                if (length > 40)
+                    length = 40, hit = "none";
+            } else if (b.dir.y() > 1e-3f && b.origin.y() < venue_height &&
+                       (venue_height - b.origin.y()) / b.dir.y() < length)
+                length = (venue_height - b.origin.y()) / b.dir.y(), hit = "ceiling";
+            for (const auto &[p, kind] : solid) {
+                float t;
+                if (!inside_unit_box(p->model, b.origin) && hit_unit_box(p->model, b.origin, b.dir, t) && t < length)
+                    length = t, pool = b.dir.y() < -0.5f, hit = kind;
+            }
+            if (pool) {
+                const QVector3D hit = b.origin + b.dir * length;
+                const float radius = std::max(length * b.tan_half, 0.05f);
+                // The same light spread over a bigger pool is dimmer: full strength up to a 1.5 m radius.
+                scene.spots.push_back({{hit.x(), hit.z()}, radius, b.colour * std::min(1.0f, 1.5f / radius)});
+            }
+            scene.beams.push_back({b.origin, b.dir, length, b.tan_half, b.colour, b.owner, hit});
         }
-        scene.beams.push_back({origin, dir, length, tan_half, colour});
     }
 
     void fixture(const json &o, const std::string &uuid, bool sel) {
@@ -100,23 +203,41 @@ struct Builder {
         float strobe = 1;
         if (a.strobe_hz > 0)
             strobe = std::fmod(time * a.strobe_hz, 1.0) < 0.3 ? 1.0f : 0.0f;
-        const float intensity = float(a.dimmer) * (a.shutter_open ? strobe : 0.0f);
-        const QVector3D down(0, -1, 0);
+        // shortcut: brightness follows sqrt(flux) against a 10000 lm reference, clamped; use photometry if users ask.
+        const float flux = std::clamp(float(std::sqrt(type.luminous_flux / 10000)), 0.25f, 1.0f);
+        const float intensity = float(a.dimmer) * (a.shutter_open ? strobe : 0.0f) * flux;
+        // shortcut: only the first beam's direction from the geometry chain, shared by every head; its offset and
+        // the head pivot's height are ignored. Make it per head if a fixture mixes orientations.
+        const QVector3D down(float(type.beam_direction[0]), float(type.beam_direction[1]),
+                             float(type.beam_direction[2]));
 
         if (moving) {
             scene.boxes.push_back({box(m, {0, -0.1f * H, 0}, {L, 0.2f * H, W}), body_colour});
-            QMatrix4x4 yoke = m;
-            yoke.rotate(float(a.pan), 0, 1, 0);
-            for (float side : {-1.f, 1.f})
-                scene.boxes.push_back(
-                    {box(yoke, {side * 0.45f * L, -0.45f * H, 0}, {0.08f * L, 0.5f * H, 0.3f * W}), body_colour});
-            QMatrix4x4 head = yoke;
-            head.translate(0, -0.6f * H, 0);
-            head.rotate(-float(a.tilt), 1, 0, 0); // positive tilt swings the beam toward +Z (POC rotDir)
-            scene.boxes.push_back({box(head, {0, -0.05f * H, 0}, {0.75f * L, 0.5f * H, 0.6f * W}), body_colour});
-            const QVector3D origin = head.map(QVector3D(0, -0.3f * H, 0));
-            const QVector3D dir = (head.mapVector(down)).normalized();
-            add_beam(origin, dir, float(a.beam_angle), QVector3D(a.colour[0], a.colour[1], a.colour[2]) * intensity);
+            // One yoke per head (TORNADO); a single-head fixture has no head list and one yoke at the body centre.
+            const std::size_t n = std::max<std::size_t>(a.heads.size(), 1);
+            const float hl = L / float(n);
+            for (std::size_t h = 0; h < n; ++h) {
+                const gdtf::HeadState *hs = a.heads.empty() ? nullptr : &a.heads[h];
+                QMatrix4x4 yoke = m;
+                if (hs) {
+                    const auto &off = st->mode->heads[h].offset;
+                    yoke.translate(float(off[0]), 0, float(off[2]));
+                }
+                yoke.rotate(float(hs ? hs->pan : a.pan), 0, 1, 0);
+                for (float side : {-1.f, 1.f})
+                    scene.boxes.push_back(
+                        {box(yoke, {side * 0.45f * hl, -0.45f * H, 0}, {0.08f * hl, 0.5f * H, 0.3f * W}), body_colour});
+                QMatrix4x4 head = yoke;
+                head.translate(0, -0.6f * H, 0);
+                // positive tilt swings the beam toward +Z (POC rotDir)
+                head.rotate(-float(hs ? hs->tilt : a.tilt), 1, 0, 0);
+                scene.boxes.push_back({box(head, {0, -0.05f * H, 0}, {0.75f * hl, 0.5f * H, 0.6f * W}), body_colour});
+                const QVector3D origin = head.map(QVector3D(0, -0.3f * H, 0));
+                const QVector3D dir = (head.mapVector(down)).normalized();
+                const gdtf::Rgb &c = hs ? hs->colour : a.colour;
+                add_beam(origin, dir, float(hs ? hs->beam_angle : a.beam_angle),
+                         QVector3D(c[0], c[1], c[2]) * intensity);
+            }
         } else {
             scene.boxes.push_back({box(m, {0, -0.5f * H, 0}, {L, H, W}), body_colour});
             const QVector3D dir = m.mapVector(down).normalized();
@@ -158,20 +279,80 @@ struct Builder {
         const json &comp = project.value("composition", json::object());
         const float cw = comp.value("width", 1920.0f), ch = comp.value("height", 1080.0f);
         const json &s = o.value("slice", json::object());
+        const QVector4D rect{s.value("x", 0.0f) / cw, s.value("y", 0.0f) / ch, s.value("w", cw) / cw,
+                             s.value("h", ch) / ch};
+        const float nits = std::clamp(o.value("nits", 1500.0f) / 1500.0f, 0.1f, 4.0f);
+        if (o.contains("strings") && o.at("strings").is_array() && !o.at("strings").empty()) {
+            wall_strings(o.at("strings"), m, rect, derived.pixels_y, nits, uuid, sel,
+                         string_facing(o.value("facing", std::string("all"))));
+            return;
+        }
         QMatrix4x4 quad = m;
         quad.translate(0, h / 2, 0);
         quad.scale(w, h, 1);
         scene.walls.push_back(
             {quad,
-             {s.value("x", 0.0f) / cw, s.value("y", 0.0f) / ch, s.value("w", cw) / cw, s.value("h", ch) / ch},
+             rect,
              {float(derived.pixels_x), float(derived.pixels_y), float(derived.modules_x), float(derived.modules_y)},
-             std::clamp(o.value("nits", 1500.0f) / 1500.0f, 0.1f, 4.0f),
+             nits,
              sel,
              -1,
              s.value("angle", 0.0f),
              cw / ch});
         scene.boxes.push_back({box(m, {0, h / 2, -0.05f}, {w, h, 0.09f}), tinted(wall_back, sel)});
         scene.pick.push_back({box(m, {0, h / 2, -0.04f}, {w, h, 0.1f}), uuid});
+    }
+
+    // A wall built from LED strings (a mapped net): each string is a polyline in the wall's local space showing
+    // one slice column, its pixels running from the first point (the slice's top) to the last.
+    // `facing` is a world direction the LEDs face, turned about each segment; zero glows all round.
+    // shortcut: the slice angle is ignored and OBJ/FBX export only the first segment, fine for upright columns.
+    void wall_strings(const json &strings, const QMatrix4x4 &m, QVector4D rect, int rows, float nits,
+                      const std::string &uuid, bool sel, QVector3D facing) {
+        const float columns = float(strings.size()), thickness = 0.03f;
+        for (std::size_t i = 0; i < strings.size(); ++i) {
+            std::vector<QVector3D> p;
+            for (const json &v : strings[i])
+                p.push_back(m.map(vec3(v)));
+            float total = 0;
+            for (std::size_t k = 1; k < p.size(); ++k)
+                total += (p[k] - p[k - 1]).length();
+            if (total <= 0)
+                continue;
+            float run = 0;
+            for (std::size_t k = 1; k < p.size(); ++k) {
+                const QVector3D d = p[k - 1] - p[k]; // local +Y points back to the start, the slice's top
+                const float len = d.length();
+                if (len < 1e-4f)
+                    continue;
+                const QVector3D along = d / len;
+                QVector3D across = QVector3D::crossProduct(along, {0, 1, 0});
+                across = across.length() < 1e-3f ? QVector3D(1, 0, 0) : across.normalized();
+                const QVector3D normal = QVector3D::crossProduct(across, along), mid = (p[k - 1] + p[k]) / 2;
+                const auto frame = [&](QVector3D x, QVector3D z, float wide, float deep) {
+                    x *= wide, z *= deep;
+                    const QVector3D y = along * len;
+                    return QMatrix4x4(x.x(), y.x(), z.x(), mid.x(), x.y(), y.y(), z.y(), mid.y(), x.z(), y.z(), z.z(),
+                                      mid.z(), 0, 0, 0, 1);
+                };
+                // All round: two crossed quads, each also mirrored so its front faces both ways (a back face draws
+                // dark). Facing one way: one quad turned toward `facing`, all round where the segment runs along it.
+                std::vector<std::pair<QVector3D, QVector3D>> faces{
+                    {across, normal}, {-across, -normal}, {normal, -across}, {-normal, across}};
+                const QVector3D toward = facing - along * QVector3D::dotProduct(facing, along);
+                if (toward.length() > 1e-3f)
+                    faces = {{QVector3D::crossProduct(along, toward.normalized()), toward.normalized()}};
+                for (const auto &[x, z] : faces)
+                    scene.walls.push_back({frame(x, z, thickness, 1),
+                                           {rect.x() + rect.z() * float(i) / columns, rect.y() + rect.w() * run / total,
+                                            rect.z() / columns, rect.w() * len / total},
+                                           {1, float(rows) * len / total, 1, 1},
+                                           nits,
+                                           sel});
+                scene.pick.push_back({frame(across, normal, 0.1f, 0.1f), uuid});
+                run += len;
+            }
+        }
     }
 
     // A bar along local X centred on the origin, one emissive cell per pixel; a slice-fed strip samples the
@@ -216,6 +397,26 @@ struct Builder {
             }
     }
 
+    void deck(const json &o, const std::string &uuid, bool sel) {
+        const float h = o.value("height", 1.0f);
+        const QMatrix4x4 m = box(world(o), {0, h / 2, 0}, {o.value("width", 4.0f), h, o.value("depth", 2.0f)});
+        scene.boxes.push_back({m, tinted(deck_colour, sel)});
+        scene.pick.push_back({m, uuid});
+    }
+
+    void shape(const json &o, const std::string &uuid, bool sel) {
+        const QVector3D size = vec3(o.value("size", json()), {1, 1, 1});
+        const QMatrix4x4 m = box(world(o), {0, size.y() / 2, 0}, size);
+        const QColor c(QString::fromStdString(o.value("color", std::string("#6b7080"))));
+        const QVector4D colour = tinted({float(c.redF()), float(c.greenF()), float(c.blueF()), 1}, sel);
+        const std::string kind = o.value("shape", std::string("box"));
+        if (kind == "cylinder" || kind == "wedge")
+            scene.meshes.push_back({kind == "cylinder" ? unit_cylinder() : unit_wedge(), m, colour});
+        else
+            scene.boxes.push_back({m, colour});
+        scene.pick.push_back({m, uuid});
+    }
+
     void set_piece(const json &o, const std::string &uuid, bool sel) {
         std::string key = o.value("geometry", std::string());
         if (const std::string group = o.value("group", std::string()); !group.empty())
@@ -237,13 +438,10 @@ struct Builder {
         scene.venue_width = venue.value("width", 20.0f);
         scene.venue_depth = venue.value("depth", 15.0f);
         scene.haze = venue.value("haze", 0.35f);
-        for (const json &d : venue.value("decks", json::array())) {
-            const float h = d.value("height", 1.0f);
-            const QVector3D p = vec3(d.value("position", json()));
-            scene.boxes.push_back(
-                {box({}, p + QVector3D(0, h / 2, 0), {d.value("width", 4.0f), h, d.value("depth", 2.0f)}),
-                 deck_colour});
-        }
+        // shortcut: haze follows the machines instantly; add a fill and decay time when shows need it
+        for (const auto &[uuid, f] : fixtures)
+            scene.haze = std::max(scene.haze, 0.8f * float(f.attrs.haze));
+        venue_height = venue.value("height", 8.0f);
         const json &objects = project.value("objects", json::array());
         for (const json &o : objects)
             if (o.contains("uuid") && o["uuid"].is_string())
@@ -254,6 +452,7 @@ struct Builder {
             const std::string uuid = o.value("uuid", std::string());
             const std::string type = o.value("type", std::string());
             const bool sel = selected.contains(uuid);
+            current_owner = int(i);
             if (type == "fixture")
                 fixture(o, uuid, sel);
             else if (type == "truss")
@@ -264,6 +463,10 @@ struct Builder {
                 strip(o, uuid, sel);
             else if (type == "setPiece")
                 set_piece(o, uuid, sel);
+            else if (type == "deck")
+                deck(o, uuid, sel);
+            else if (type == "shape")
+                shape(o, uuid, sel);
             // Cameras are not drawn.
             for (auto k = boxes; k < scene.boxes.size(); ++k)
                 scene.boxes[k].owner = int(i);
@@ -272,6 +475,66 @@ struct Builder {
             for (auto k = pieces; k < scene.meshes.size(); ++k)
                 scene.meshes[k].owner = int(i);
         }
+        resolve_beams();
+        gizmo();
+    }
+
+    // FR-5 combined move/rotate/scale handles on the one selected object, in its parent's axes at its origin.
+    // The viewport asks for them with a "gizmo:<all|move|rotate|scale>" entry in the selection; owner stays -1.
+    // shortcut: fixed 1 m handles drawn with depth test; scale with camera distance and draw on top when rigs need it.
+    void gizmo() {
+        std::string mode;
+        const json *one = nullptr;
+        int count = 0;
+        for (const std::string &s : selected)
+            if (s.starts_with("gizmo:"))
+                mode = s.substr(6);
+            else if (const auto it = by_uuid.find(s); it != by_uuid.end())
+                one = it->second, ++count;
+        if (mode.empty() || count != 1)
+            return;
+        const QMatrix4x4 w = world(*one);
+        QMatrix4x4 r = w * local_transform(*one).inverted(); // the parent's world transform
+        r.setColumn(3, QVector4D(w.map(QVector3D()), 1));
+        for (int c = 0; c < 3; ++c) // parent axes without its scale
+            r.setColumn(c, QVector4D(r.column(c).toVector3D().normalized(), 0));
+        // Lifted onto the object's top along the parent's up axis, so decks and shapes do not bury it.
+        const QVector3D origin = r.column(3).toVector3D(), up = r.column(1).toVector3D();
+        const std::string id = one->value("uuid", std::string());
+        float lift = 0;
+        for (const PickBox &p : scene.pick)
+            if (p.uuid == id)
+                for (int k = 0; k < 8; ++k)
+                    lift = std::max(
+                        lift, QVector3D::dotProduct(p.model.map(QVector3D(k & 1 ? 0.5f : -0.5f, k & 2 ? 0.5f : -0.5f,
+                                                                          k & 4 ? 0.5f : -0.5f)) -
+                                                        origin,
+                                                    up));
+        r.setColumn(3, QVector4D(origin + up * (lift + 0.05f), 1));
+        scene.gizmo = r;
+        const auto handle = [&](QVector3D centre, QVector3D size, QVector4D colour, const char *name) {
+            scene.boxes.push_back({box(r, centre, size), colour});
+            scene.pick.push_back({box(r, centre, size + QVector3D(0.12f, 0.12f, 0.12f)), name});
+        };
+        if (mode == "all" || mode == "move") {
+            static const char *names[] = {"gizmo:tx", "gizmo:ty", "gizmo:tz"};
+            for (int a = 0; a < 3; ++a) {
+                QVector3D axis, bar(0.04f, 0.04f, 0.04f);
+                axis[a] = 1;
+                bar[a] = 1;
+                QVector4D colour(0.25f, 0.25f, 0.25f, 1);
+                colour[a] = 1;
+                handle(axis * 0.55f, bar, colour, names[a]);
+                handle(axis * 1.1f, {0.14f, 0.14f, 0.14f}, colour, names[a]);
+            }
+        }
+        if (mode == "all" || mode == "rotate")
+            for (const float sgn : {-1.f, 1.f}) {
+                handle({0, 0, 0.8f * sgn}, {1.6f, 0.04f, 0.04f}, {1, 0.82f, 0.25f, 1}, "gizmo:ry");
+                handle({0.8f * sgn, 0, 0}, {0.04f, 0.04f, 1.6f}, {1, 0.82f, 0.25f, 1}, "gizmo:ry");
+            }
+        if (mode == "all" || mode == "scale")
+            handle({0.6f, 0.6f, 0.6f}, {0.16f, 0.16f, 0.16f}, {0.9f, 0.9f, 0.9f, 1}, "gizmo:s");
     }
 };
 
@@ -389,6 +652,15 @@ std::shared_ptr<const Mesh> make_mesh(std::vector<float> vertices, QVector4D col
     return m;
 }
 
+QMatrix4x4 world_transform(const json &project, const json &object) {
+    std::map<std::string, const json *> by_uuid;
+    if (project.contains("objects")) // never value(): by_uuid points into the array
+        for (const json &o : project.at("objects"))
+            if (o.contains("uuid") && o["uuid"].is_string())
+                by_uuid[o["uuid"].get<std::string>()] = &o;
+    return world_of(object, by_uuid);
+}
+
 RenderScene build_scene(const json &project, const std::map<std::string, FixtureState> &fixtures,
                         const std::set<std::string> &selected, double time_s, const MeshLibrary &meshes) {
     Builder b{project, fixtures, selected, time_s, meshes, {}, {}};
@@ -430,7 +702,7 @@ std::vector<proto::GeneratorTarget> generator_targets(const json &project, const
 }
 
 namespace {
-// The scene at rest (no DMX) as world-space triangles per owner (index into objects, -1 for the venue), with the
+// The scene at rest (no DMX) as world-space triangles per owner (index into objects), with the
 // first instance colour, plus each wall's screen.
 struct Gathered {
     std::map<int, std::vector<QVector3D>> tris;
@@ -502,8 +774,6 @@ std::string export_obj(const json &project, const FixtureLibrary &library, const
         next += v.size();
     };
     const auto wanted = [&](int owner) { return sv::render::wanted(objects, only, owner); };
-    if (wanted(-1) && tris.contains(-1))
-        emit("Venue", tris[-1], nullptr);
     for (std::size_t i = 0; i < objects.size(); ++i) {
         if (!wanted(int(i)))
             continue;
@@ -527,11 +797,9 @@ std::vector<std::uint8_t> export_fbx(const json &project, const FixtureLibrary &
     Gathered g;
     gather(g, project, library, meshes);
     const json &objects = project.value("objects", json::array());
-    static const std::map<std::string, std::string> folder{{"truss", "Trusses"},
-                                                           {"ledWall", "Walls"},
-                                                           {"pixelStrip", "Walls"},
-                                                           {"fixture", "Fixtures"},
-                                                           {"setPiece", "Set pieces"}};
+    static const std::map<std::string, std::string> folder{
+        {"truss", "Trusses"},    {"ledWall", "Walls"},       {"pixelStrip", "Walls"},
+        {"fixture", "Fixtures"}, {"setPiece", "Set pieces"}, {"shape", "Set pieces"}}; // decks fall to "Venue"
     std::vector<FbxMesh> out;
     std::vector<FbxCamera> cameras;
     const auto mesh = [&](std::string name, std::string parent, const std::vector<QVector3D> &v, QVector4D c) {
@@ -541,8 +809,6 @@ std::vector<std::uint8_t> export_fbx(const json &project, const FixtureLibrary &
         out.push_back(std::move(m));
         return &out.back();
     };
-    if (wanted(objects, only, -1) && g.tris.contains(-1))
-        mesh("Venue", "", g.tris[-1], g.colour[-1]);
     for (std::size_t i = 0; i < objects.size(); ++i) {
         if (!wanted(objects, only, int(i)))
             continue;
@@ -600,10 +866,12 @@ std::vector<std::uint8_t> export_fbx(const json &project, const FixtureLibrary &
 std::optional<std::string> pick(const RenderScene &scene, QVector3D origin, QVector3D direction) {
     std::optional<std::string> best;
     float best_t = 1e30f;
+    bool best_gizmo = false;
     for (const PickBox &p : scene.pick) {
         float t;
-        if (hit_unit_box(p.model, origin, direction, t) && t < best_t)
-            best_t = t, best = p.uuid;
+        const bool gizmo = p.uuid.starts_with("gizmo:"); // handles win over the body they sit in
+        if (hit_unit_box(p.model, origin, direction, t) && (gizmo > best_gizmo || (gizmo == best_gizmo && t < best_t)))
+            best_t = t, best = p.uuid, best_gizmo = gizmo;
     }
     return best;
 }

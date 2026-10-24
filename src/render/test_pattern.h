@@ -5,9 +5,15 @@
 #include "core/model.h"
 
 #include <QImage>
+#include <map>
 
 namespace sv::render {
 
 QImage make_composition(const json &project, const QImage &still = {}); // RGBA8888 at composition size (capped at 4096)
+
+// Per-output live feeds (one NDI stream per Resolume Screen): every wall or strip on a fed output gets its outRect of
+// that output's frame painted onto its slice of the composition. Output uuid -> latest frame.
+QImage compose_feeds(const json &project, QImage composition, const std::map<std::string, QImage> &feeds,
+                     const std::map<std::string, double> &opacity = {}); // per output, 1 if missing
 
 } // namespace sv::render

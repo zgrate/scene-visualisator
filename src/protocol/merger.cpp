@@ -77,4 +77,33 @@ UniverseMerger::Result UniverseMerger::merge() const {
     return r;
 }
 
+Slots mix_playback(const Slots &live, const PlaybackMix &mix, std::bitset<512> *from_recording) {
+    Slots out = live;
+    std::bitset<512> rec;
+    for (std::size_t i = 0; i < 512; ++i) {
+        const int w = mix.weight[i];
+        if (w == 0)
+            continue;
+        const bool wide = i + 1 < 512 && mix.fine[i + 1]; // a 16-bit pair, coarse first
+        const auto value = [&](const Slots &s) { return wide ? s[i] << 8 | s[i + 1] : int(s[i]); };
+        const int l = value(live), r = value(mix.frame);
+        int v;
+        if (mix.htp[i])
+            v = std::max(l, r), rec[i] = r > l;
+        else if (mix.snap[i] || w == 255)
+            v = w >= 128 ? r : l, rec[i] = w >= 128;
+        else
+            v = (l * (255 - w) + r * w + 127) / 255, rec[i] = w >= 128;
+        if (wide) {
+            out[i] = std::uint8_t(v >> 8), out[i + 1] = std::uint8_t(v), rec[i + 1] = rec[i];
+            ++i;
+        } else {
+            out[i] = std::uint8_t(v);
+        }
+    }
+    if (from_recording)
+        *from_recording = rec;
+    return out;
+}
+
 } // namespace sv::proto

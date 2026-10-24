@@ -49,6 +49,20 @@ Column {
             values: [insp.o.name || ""]
             onCommitted: (i, t) => Session.edit(insp.uuid, "/name", t)
         }
+        RowLayout {
+            width: parent.width
+            Label { text: qsTr("Layer"); color: Theme.muted; font.pixelSize: Theme.small + 1; Layout.preferredWidth: 62 }
+            ComboBox {
+                readonly property var layers: [{ uuid: null, name: qsTr("(none)") }].concat(Session.layers)
+                Layout.fillWidth: true
+                implicitHeight: 24
+                font.pixelSize: Theme.small + 1
+                model: layers.map(l => l.name)
+                currentIndex: Math.max(0, layers.findIndex(l => l.uuid === (insp.o.layer || null)))
+                // Applies to the whole selection.
+                onActivated: i => Session.editSelection("/layer", layers[i].uuid)
+            }
+        }
         Field {
             label: qsTr("Position")
             values: (insp.o.position || [0, 0, 0]).map(insp.fmt)
@@ -58,6 +72,65 @@ Column {
             label: qsTr("Rotation")
             values: (insp.o.rotation || [0, 0, 0]).map(insp.fmt)
             onCommitted: (i, t) => insp.num("/rotation/" + i, t)
+        }
+        Field {
+            label: qsTr("Scale")
+            values: (insp.o.scale || [1, 1, 1]).map(insp.fmt)
+            onCommitted: (i, t) => insp.num("/scale/" + i, t)
+        }
+
+        // Deck: bottom sits on its position
+        Field {
+            visible: insp.o.type === "deck"
+            label: qsTr("W D H m")
+            values: [insp.fmt(insp.o.width), insp.fmt(insp.o.depth), insp.fmt(insp.o.height)]
+            onCommitted: (i, t) => insp.num("/" + ["width", "depth", "height"][i], t)
+        }
+
+        // Shape primitive
+        Column {
+            visible: insp.o.type === "shape"
+            width: parent.width
+            spacing: 4
+            RowLayout {
+                width: parent.width
+                Label { text: qsTr("Shape"); color: Theme.muted; font.pixelSize: Theme.small + 1; Layout.preferredWidth: 62 }
+                ComboBox {
+                    readonly property var kinds: ["box", "cylinder", "wedge"]
+                    Layout.fillWidth: true
+                    implicitHeight: 24
+                    font.pixelSize: Theme.small + 1
+                    model: kinds
+                    currentIndex: kinds.indexOf(insp.o.shape || "box")
+                    onActivated: i => Session.edit(insp.uuid, "/shape", kinds[i])
+                }
+            }
+            Field {
+                label: qsTr("Size m")
+                values: (insp.o.size || [1, 1, 1]).map(insp.fmt)
+                onCommitted: (i, t) => insp.num("/size/" + i, t)
+            }
+            Field {
+                label: qsTr("Colour")
+                numeric: false
+                values: [insp.o.color || ""]
+                onCommitted: (i, t) => { if (/^#[0-9a-fA-F]{6}$/.test(t)) Session.editSelection("/color", t, "shape"); else Session.changed() }
+            }
+            Row {
+                x: 66
+                spacing: 4
+                // Material presets stored in the document (floor, wall, light, wood, black, white), not app chrome.
+                Repeater {
+                    model: ["#2a2d33", "#8a8f99", "#c9ccd2", "#7a5a3c", "#15171b", "#e8e6e1"]
+                    Rectangle {
+                        required property string modelData
+                        width: 18; height: 18; radius: 3
+                        color: modelData
+                        border.color: insp.o.color === modelData ? Theme.accent : Theme.line
+                        TapHandler { onTapped: Session.editSelection("/color", parent.modelData, "shape") }
+                    }
+                }
+            }
         }
 
         // Fixture
@@ -138,6 +211,21 @@ Column {
                 values: [insp.fmt(insp.o.nits), insp.fmt(insp.o.gamma)]
                 onCommitted: (i, t) => insp.num(i ? "/gamma" : "/nits", t)
             }
+            RowLayout {
+                visible: (insp.o.strings || []).length > 0
+                width: parent.width
+                Label { text: qsTr("Facing"); color: Theme.muted; font.pixelSize: Theme.small + 1; Layout.preferredWidth: 62 }
+                ComboBox {
+                    readonly property var facings: ["all", "down", "up", "front", "back", "left", "right"]
+                    Layout.fillWidth: true
+                    implicitHeight: 24
+                    font.pixelSize: Theme.small + 1
+                    model: [qsTr("All round"), qsTr("Down"), qsTr("Up"), qsTr("Front (audience)"), qsTr("Back"),
+                        qsTr("Left (−X)"), qsTr("Right (+X)")]
+                    currentIndex: Math.max(0, facings.indexOf(insp.o.facing || "all"))
+                    onActivated: i => Session.editSelection("/facing", facings[i], "ledWall")
+                }
+            }
             SliceField {}
             Label {
                 x: 66
@@ -207,7 +295,7 @@ Column {
                     font.pixelSize: Theme.small + 1
                     model: [qsTr("DMX (as WLED shows it)"), qsTr("Composition slice")]
                     currentIndex: sources.indexOf(insp.o.pixelSource || "dmx")
-                    onActivated: i => Session.edit(insp.uuid, "/pixelSource", sources[i])
+                    onActivated: i => Session.editSelection("/pixelSource", sources[i], "pixelStrip") // every selected strip
                 }
             }
             SliceField {}
@@ -246,6 +334,13 @@ Column {
         RowLayout {
             width: parent.width
             spacing: 6
+            Button {
+                visible: insp.o.type === "fixture"
+                readonly property bool on: Session.located.includes(insp.uuid)
+                text: on ? qsTr("Unlocate") : qsTr("Locate")
+                font.pixelSize: Theme.small + 1
+                onClicked: Session.locate(Session.selectedUuids, !on)
+            }
             Button {
                 text: qsTr("Duplicate")
                 font.pixelSize: Theme.small + 1

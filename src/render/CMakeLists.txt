@@ -3,6 +3,7 @@ add_library(sv_render STATIC
     camera.cpp camera.h
     drawing_painter.cpp drawing_painter.h
     scene_builder.cpp scene_builder.h
+    transform_math.cpp transform_math.h
     scene_renderer.cpp scene_renderer.h
     test_pattern.cpp test_pattern.h)
 target_include_directories(sv_render PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

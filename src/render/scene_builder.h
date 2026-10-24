@@ -33,7 +33,7 @@ std::shared_ptr<const Mesh> make_mesh(std::vector<float> vertices, QVector4D col
 // By package path ("geometry/stage.obj") and per OBJ group ("geometry/stage.obj#Truss").
 using MeshLibrary = std::map<std::string, std::shared_ptr<const Mesh>, std::less<>>;
 
-// owner: index into project["objects"], -1 for venue parts (decks). Used by OBJ export.
+// owner: index into project["objects"]. Used by OBJ/FBX export and drawings.
 struct BoxInstance {
     QMatrix4x4 model; // unit cube centred at the origin
     QVector4D colour;
@@ -48,7 +48,9 @@ struct MeshInstance {
 struct BeamInstance {
     QVector3D origin, direction;
     float length, tan_half_angle;
-    QVector3D colour; // already scaled by intensity
+    QVector3D colour;         // already scaled by intensity
+    int owner = -1;           // index into project["objects"]
+    const char *hit = "none"; // what ends it: floor, ceiling (venue height), deck, shape, ledWall, setPiece or none
 };
 struct WallInstance {
     QMatrix4x4 model; // unit quad [-0.5, 0.5]^2 in local XY, front facing +Z
@@ -72,6 +74,8 @@ struct PickBox {
 
 struct RenderScene {
     float venue_width = 20, venue_depth = 15, haze = 0.35f;
+    // Frame of the transform gizmo (parent axes, unscaled, origin on the object's top) when one is drawn.
+    std::optional<QMatrix4x4> gizmo;
     std::vector<BoxInstance> boxes;
     std::vector<MeshInstance> meshes;
     std::vector<BeamInstance> beams;
@@ -98,7 +102,10 @@ std::vector<std::uint8_t> export_fbx(const json &project, const FixtureLibrary &
 // What the internal generators (FR-11) drive for each patched fixture of a known type.
 std::vector<proto::GeneratorTarget> generator_targets(const json &project, const FixtureLibrary &library);
 
-// Nearest object hit by a world-space ray (direction normalised).
+// An object's local-to-world matrix with its parents applied (T·Ry·Rx·Rz·S per level).
+QMatrix4x4 world_transform(const json &project, const json &object);
+
+// Nearest object hit by a world-space ray (direction normalised); a "gizmo:<handle>" box beats any object.
 std::optional<std::string> pick(const RenderScene &scene, QVector3D origin, QVector3D direction);
 
 } // namespace sv::render

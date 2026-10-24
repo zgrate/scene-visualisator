@@ -106,7 +106,7 @@ TEST_CASE("AT-6 autosave is offered until the next real save") {
     CHECK_FALSE(sv::has_newer_autosave(path));
 }
 
-TEST_CASE("an alpha (schema 1) package migrates to schema 2") {
+TEST_CASE("an alpha (schema 1) package migrates to the current schema") {
     TempDir t;
     sv::Package alpha = sample();
     alpha.project["schemaVersion"] = 1;

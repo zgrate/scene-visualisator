@@ -8,7 +8,8 @@ import QtQuick.Layouts
 // arrival to render) or "No signal" in the warn colour.
 Popup {
     id: card
-    width: 300
+    width: 340
+    margins: 8 // kept inside the window when the dock button sits near its edge
     padding: 12
     readonly property var source: (Session.compositionInfo.source || { kind: "testPattern" })
     readonly property var kinds: [["testPattern", qsTr("Test pattern")], ["grid", qsTr("Mapping grid")],
@@ -137,6 +138,91 @@ Popup {
             text: card.error
             color: Theme.err
             font.pixelSize: Theme.small + 1
+        }
+
+        // One feed per Resolume output (Arena sends an NDI stream per Screen); its walls show their output rect of
+        // it. Lumiverse outputs come in over Art-Net/sACN and only show their state.
+        RowLayout {
+            visible: Session.feedStatus.length > 0
+            Layout.topMargin: 6
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("RESOLUME OUTPUTS")
+                color: Theme.muted
+                font.pixelSize: 8
+                font.letterSpacing: 1.2
+            }
+            Button {
+                text: qsTr("Connect NDI")
+                onClicked: card.error = Session.connectResolumeFeeds()
+            }
+        }
+        Repeater {
+            model: Session.feedStatus.length // a count, so the 20 Hz status refresh keeps the delegates (and open combos)
+            ColumnLayout {
+                id: row
+                required property int index
+                readonly property var st: Session.feedStatus[index] || ({})
+                readonly property bool dmx: st.kind === "lumiverse"
+                readonly property string feedKind: st.feedKind || ""
+                Layout.fillWidth: true
+                spacing: 4
+                RowLayout {
+                    Layout.fillWidth: true
+                    Rectangle {
+                        implicitWidth: 6; implicitHeight: 6; radius: 3
+                        color: row.st.error ? Theme.err : row.st.signal ? Theme.ok
+                               : row.dmx || row.feedKind !== "" ? Theme.warn : Theme.line
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: row.st.name || ""
+                        color: Theme.fg
+                        elide: Text.ElideRight
+                        font.pixelSize: Theme.small + 1
+                    }
+                    Label {
+                        text: row.dmx ? qsTr("U%1 · %2 Hz").arg(row.st.universe).arg((row.st.rate || 0).toFixed(0))
+                              : row.st.error ? row.st.error
+                              : row.st.signal ? qsTr("%1 fps · %2 ms").arg(row.st.fps.toFixed(1)).arg(row.st.latency.toFixed(0))
+                              : row.feedKind !== "" ? qsTr("No signal") : qsTr("%1×%2").arg(row.st.width).arg(row.st.height)
+                        color: row.st.error ? Theme.err : Theme.muted
+                        elide: Text.ElideRight
+                        Layout.maximumWidth: 150
+                        font.family: Theme.mono
+                        font.pixelSize: Theme.small
+                    }
+                }
+                RowLayout {
+                    visible: !row.dmx
+                    Layout.fillWidth: true
+                    readonly property var feedKinds: [["", qsTr("Composition")], ["ndi", qsTr("NDI")],
+                                                      ["screen", qsTr("Screen")], ["window", qsTr("Window")]].concat(
+                                                      Qt.platform.os === "windows" ? [["spout", qsTr("Spout")]]
+                                                      : Qt.platform.os === "osx" ? [["syphon", qsTr("Syphon")]] : [])
+                    ComboBox {
+                        id: feedKind
+                        implicitWidth: 104
+                        model: parent.feedKinds.map(k => k[1])
+                        currentIndex: Math.max(0, parent.feedKinds.findIndex(k => k[0] === row.feedKind))
+                        onActivated: i => {
+                            const kind = parent.feedKinds[i][0]
+                            card.error = ""
+                            Session.edit(row.st.uuid, "/feed", kind === "" ? null
+                                         : { kind: kind, name: kind === "ndi" ? "" : (Session.mediaSources(kind)[0] || "") })
+                        }
+                    }
+                    ComboBox {
+                        visible: row.feedKind !== ""
+                        Layout.fillWidth: true
+                        model: row.st.feedName ? [row.st.feedName] : [] // listed on open: NDI discovery blocks
+                        currentIndex: model.indexOf(row.st.feedName)
+                        displayText: row.st.feedName || qsTr("Pick a sender…")
+                        onActivated: i => Session.edit(row.st.uuid, "/feed", { kind: row.feedKind, name: model[i] })
+                        onPressedChanged: if (pressed) model = Session.mediaSources(row.feedKind)
+                    }
+                }
+            }
         }
     }
 }

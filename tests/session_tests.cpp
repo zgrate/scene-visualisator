@@ -1,6 +1,7 @@
 #include "session.h"
 
 #include "ai_access.h"
+#include "view_keys.h"
 
 #include "core/interchange.h"
 #include "core/project_file.h"
@@ -9,6 +10,7 @@
 
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QJsonDocument>
 #include <QGuiApplication>
 #include <QPainter>
 #include <QRegularExpression>
@@ -18,8 +20,8 @@
 #include <QTimer>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
-#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <filesystem>
 #include <fstream>
 #include <ranges>
@@ -53,6 +55,82 @@ TEST_CASE("Session adds fixtures at the next free ID and address, rolling to the
     CHECK(s.current()["overflow"] == false);
 }
 
+TEST_CASE("FR-2 addObject places a deck and a shape at a floor point") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    CHECK(s.addObject("deck", {{"position", QVariantList{2.0, 0.0, -1.0}}, {"height", 0.6}}).isEmpty());
+    const json &d = object(s, selected(s));
+    CHECK(d["type"] == "deck");
+    CHECK(d["height"] == 0.6);
+    CHECK(d["position"] == json{2.0, 0.0, -1.0});
+    CHECK(s.document().history().back().label == "Add deck");
+    CHECK(s.addObject("shape", {{"shape", "cylinder"}}).isEmpty());
+    CHECK(object(s, selected(s))["shape"] == "cylinder");
+    CHECK(object(s, selected(s))["name"] == "Cylinder");
+    CHECK_FALSE(s.addObject("sphere", {}).isEmpty());
+    s.edit("venue", "/width", 30.0);
+    CHECK(s.document().data()["venue"]["width"] == 30.0);
+    // A strip is patched after its fields merge, so a long strip does not overlap the next one.
+    REQUIRE(s.addObject("strip", {{"pixels", 200}}).isEmpty());
+    REQUIRE(s.addObject("strip", {}).isEmpty());
+    s.selectUuids({});           // selected channels show as 3 and would hide a conflict
+    for (int u = 1; u <= 8; ++u) // no channel is claimed twice (occupancy 2 = conflict)
+        CHECK(std::ranges::count(s.occupancy(u), std::uint8_t(2)) == 0);
+}
+
+TEST_CASE("FR-4 FR-8 addFixtureArray adds N fixtures in one undo step, consecutive IDs and addresses rolling "
+          "universes, parented to a truss") {
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    s.addTruss();
+    const QString truss = QString::fromStdString(*s.selection().begin());
+    const std::size_t steps = s.document().cursor();
+    const QVariantList origin{-2.0, -0.2, 0.0}, step{1.0, 0.0, 0.0};
+    REQUIRE(s.addFixtureArray("Generic@Spot_7ch.gdtf", "Default", 5, origin, step, "1.500", truss).isEmpty());
+    CHECK(s.document().cursor() == steps + 1);
+    const json &objects = s.document().data()["objects"];
+    REQUIRE(objects.size() == 6);
+    CHECK(objects[1]["fixtureId"] == 101);
+    CHECK(objects[5]["fixtureId"] == 105);
+    CHECK(objects[1]["patch"] == json{{"universe", 1}, {"address", 500}});
+    CHECK(objects[2]["patch"] == json{{"universe", 2}, {"address", 1}}); // 500 + 7 > 512
+    CHECK(objects[3]["patch"] == json{{"universe", 2}, {"address", 8}});
+    CHECK(objects[5]["position"] == json{2.0, -0.2, 0.0});
+    CHECK(objects[5]["parent"] == truss.toStdString());
+    CHECK(s.selection().size() == 5);
+    // Empty start patch continues after the last fixture; no parent stays top level.
+    REQUIRE(s.addFixtureArray("Generic@Spot_7ch.gdtf", "Default", 1, origin, step, "", "").isEmpty());
+    CHECK(s.document().data()["objects"].back()["patch"] == json{{"universe", 2}, {"address", 29}});
+    CHECK(s.document().data()["objects"].back()["parent"].is_null());
+    CHECK_FALSE(s.addFixtureArray("nope.gdtf", "Default", 1, origin, step, "", "").isEmpty());
+    CHECK_FALSE(s.addFixtureArray("Generic@Spot_7ch.gdtf", "Default", 0, origin, step, "", "").isEmpty());
+    CHECK_FALSE(s.addFixtureArray("Generic@Spot_7ch.gdtf", "Default", 1, origin, step, "x", "").isEmpty());
+    CHECK_FALSE(s.addFixtureArray("Generic@Spot_7ch.gdtf", "Default", 1, origin, step, "", "missing").isEmpty());
+}
+
+TEST_CASE("FR-5 addWallRun turns N points into N-1 wall shapes rotated about Y in one undo step") {
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    const std::size_t steps = s.document().cursor();
+    const QVariantList pts{QVariantList{0.0, 0.0}, QVariantList{4.0, 0.0}, QVariantList{4.0, -3.0}};
+    REQUIRE(s.addWallRun(pts, 3, 0.2).isEmpty());
+    CHECK(s.document().cursor() == steps + 1);
+    CHECK(s.document().history().back().label == "Draw walls");
+    const json &objects = s.document().data()["objects"];
+    REQUIRE(objects.size() == 2);
+    CHECK(objects[0]["size"] == json{4.0, 3.0, 0.2});
+    CHECK(objects[0]["position"] == json{2.0, 0.0, 0.0});
+    CHECK(objects[0]["rotation"][1] == 0.0);
+    CHECK(objects[1]["size"][0] == 3.0);
+    CHECK(objects[1]["position"] == json{4.0, 0.0, -1.5});
+    CHECK(objects[1]["rotation"][1].get<double>() == Catch::Approx(90)); // -Z is +90 about Y
+    CHECK(s.selection().size() == 2);
+    CHECK(objects[1]["name"] == "Wall 2");
+    REQUIRE(s.addWallRun({pts[1], pts[2]}, 3, 0.2).isEmpty()); // one segment per click keeps counting
+    CHECK(s.document().data()["objects"].back()["name"] == "Wall 3");
+    CHECK_FALSE(s.addWallRun({QVariantList{0.0, 0.0}}, 3, 0.2).isEmpty());
+}
+
 TEST_CASE("Session edits keep integers, duplicate re-addresses, delete and undo restore") {
     Session s(nullptr);
     s.set_project(sv::demo_project());
@@ -80,23 +158,45 @@ TEST_CASE("Session edits keep integers, duplicate re-addresses, delete and undo 
     CHECK(s.can_redo());
 }
 
-TEST_CASE("Session drag preview changes only the snapshot until commit") {
+TEST_CASE("FR-5 preview_transform changes only the snapshot; commit writes position, rotation and scale as one step") {
     Session s(nullptr);
     s.set_project(sv::demo_project());
-    const std::string uuid = s.document().data()["objects"][0]["uuid"];
-    s.preview_move(uuid, {1, 6.5f, 2});
-    CHECK(s.document().data()["objects"][0]["position"][0] == 0.0);
-    CHECK((*s.snapshot())["objects"][0]["position"][0] == 1.0);
-    s.commit_move();
-    CHECK(s.document().data()["objects"][0]["position"] == json{1.0, 6.5, 2.0});
-    CHECK(s.can_undo());
+    const std::string uuid = s.document().data()["objects"][1]["uuid"];
+    const std::size_t steps = s.document().cursor();
+    s.preview_transform(uuid, {{"position", {1, 6.5, 2}}});
+    s.preview_transform(uuid, {{"position", {1, 6.5, 2}}, {"rotation", {0, 45, 0}}, {"scale", {2, 2, 2}}});
+    CHECK(s.document().data()["objects"][1]["position"][0] == 0.0);
+    CHECK((*s.snapshot())["objects"][1]["rotation"][1] == 45);
+    s.commit_transform("Rotate");
+    const json &o = s.document().data()["objects"][1];
+    CHECK(o["position"] == json{1, 6.5, 2});
+    CHECK(o["rotation"] == json{0, 45, 0});
+    CHECK(o["scale"] == json{2, 2, 2});
+    CHECK(s.document().cursor() == steps + 1);
+    CHECK(s.document().history().back().label == "Rotate");
+    s.preview_transform(uuid, {{"position", {9, 9, 9}}});
+    s.cancel_transform();
+    CHECK((*s.snapshot())["objects"][1]["position"] == json{1, 6.5, 2});
+    s.commit_transform("Move"); // nothing pending
+    CHECK(s.document().cursor() == steps + 1);
+}
+
+TEST_CASE("controls preference defaults to blender and notifies on change") {
+    Session s(nullptr);
+    CHECK(Session::controls() == "blender");
+    int notified = 0;
+    QObject::connect(&s, &Session::changed, [&] { ++notified; });
+    Session::setPreference("controls", "maya");
+    CHECK(Session::controls() == "maya");
+    Session::setPreference("controls", "blender");
+    CHECK(notified == 2);
 }
 
 TEST_CASE("Session nudge moves every selected object in one undo step") {
     Session s(nullptr);
     s.set_project(sv::demo_project());
-    const auto position = [&](int i) { return s.document().data()["objects"][i]["position"]; };
-    for (int i : {0, 1})
+    const auto position = [&](int i) { return s.document().data()["objects"][i + 1]["position"]; }; // after the deck
+    for (int i : {1, 2})
         s.selectUuid(QString::fromStdString(s.document().data()["objects"][i]["uuid"]), i > 0);
     s.nudgeSelection(0.25, 0, -0.25);
     CHECK(position(0) == json{0.25, 6.5, 1.25});
@@ -327,6 +427,18 @@ json tool(const std::vector<sv::mcp::Tool> &tools, const std::string &name, cons
 }
 } // namespace
 
+TEST_CASE("Venue haze is editable, read back by Session.venue and get_project") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const std::size_t steps = s.document().cursor();
+    s.edit("venue", "/haze", 0.1);
+    CHECK(s.document().cursor() == steps + 1);
+    CHECK(s.venue()["haze"].toDouble() == Catch::Approx(0.1));
+    const json venue = tool(make_mcp_tools(s), "get_project")["venue"];
+    CHECK(venue["haze"] == 0.1);
+    CHECK(venue["height"] == s.document().data()["venue"]["height"]);
+}
+
 TEST_CASE("AI tools: every edit is one undo step labelled AI, errors come back as tool errors") {
     Session s(nullptr);
     s.set_project(sv::demo_project());
@@ -341,6 +453,8 @@ TEST_CASE("AI tools: every edit is one undo step labelled AI, errors come back a
     CHECK(s.document().cursor() == steps + 1);
     CHECK(s.document().history().back().label == "AI: Edit /position/1");
 
+    CHECK(tool(tools, "add_object", {{"type", "deck"}})["type"] == "deck");
+    tool(tools, "undo");
     const json wall = tool(tools, "add_object", {{"type", "wall"}, {"fields", {{"name", "AI wall"}}}});
     CHECK(wall["name"] == "AI wall");
     CHECK(s.document().history()[s.document().cursor() - 1].label.starts_with("AI: "));
@@ -351,6 +465,33 @@ TEST_CASE("AI tools: every edit is one undo step labelled AI, errors come back a
     CHECK(tool(tools, "undo")["undone"].get<std::string>().starts_with("AI: "));
     CHECK(tool(tools, "undo")["undone"] == "AI: Add LED wall");
     CHECK(s.document().cursor() == steps + 1);
+    const json walls = tool(tools, "add_wall_run", {{"points", {{0, 0}, {4, 0}, {4, 3}, {0, 3}}}})["walls"];
+    CHECK(walls.size() == 3);
+    CHECK(object(s, QString::fromStdString(walls[0]))["shape"] == "box");
+    CHECK(tool(tools, "undo")["undone"].get<std::string>().starts_with("AI: "));
+    CHECK_THROWS(tool(tools, "add_wall_run", {{"points", {{0, 0}}}}));
+
+    const json array = tool(tools, "add_fixture_array",
+                            {{"gdtf", "Generic@Spot_7ch.gdtf"},
+                             {"mode", s.modes("Generic@Spot_7ch.gdtf")[0].toStdString()},
+                             {"count", 4},
+                             {"patch", "2.500"}})["fixtures"];
+    REQUIRE(array.size() == 4);
+    CHECK(array[0]["patch"] == json({{"universe", 2}, {"address", 500}}));
+    CHECK(array[1]["patch"] == json({{"universe", 3}, {"address", 1}})); // 7 channels do not fit after 2.507
+    CHECK(array[3]["fixtureId"].get<int>() == array[0]["fixtureId"].get<int>() + 3);
+    CHECK(tool(tools, "undo")["undone"].get<std::string>().starts_with("AI: "));
+
+    json spec = tool(tools, "get_fixture_spec", {{"gdtf", "Generic@Spot_7ch.gdtf"}});
+    CHECK(spec["bundled"] == true);
+    CHECK_THROWS_WITH(tool(tools, "save_fixture_type", {{"spec", spec}}),
+                      "Bundled types are read-only; change the name");
+    spec["name"] = "AI Spot";
+    spec["manufacturer"] = "Acme";
+    CHECK(tool(tools, "save_fixture_type", {{"spec", spec}})["gdtf"] == "Acme@AI_Spot.gdtf");
+    CHECK(tool(tools, "get_fixture_spec", {{"gdtf", "Acme@AI_Spot.gdtf"}})["name"] == "AI Spot");
+    CHECK_THROWS(tool(tools, "get_fixture_spec", {{"gdtf", "nope.gdtf"}}));
+
     s.addTruss(); // user edits keep their plain labels
     CHECK_FALSE(s.document().history().back().label.starts_with("AI: "));
 
@@ -368,8 +509,69 @@ TEST_CASE("AI tools: every edit is one undo step labelled AI, errors come back a
     s.setDebugMode(true, false);
     CHECK(log->available());
     Session::append_log("info sv.test ai tools marker"); // main.cpp's message handler does this in the app
-    CHECK(tool(tools, "get_log", {{"filter", "AI TOOLS MARKER"}})["text"] == "info sv.test ai tools marker");
+    CHECK(tool(tools, "get_log", {{"filter", "AI TOOLS MARKER"}})["lines"] == json{"info sv.test ai tools marker"});
     s.setDebugMode(false, false);
+}
+
+TEST_CASE("AI tools filter objects, describe types and beams, list files and reply with JSON") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const auto tools = make_mcp_tools(s);
+
+    const json spots = tool(tools, "list_objects", {{"gdtf", "Generic@Spot_7ch.gdtf"}, {"name", "spot"}})["objects"];
+    REQUIRE_FALSE(spots.empty());
+    for (const json &o : spots)
+        CHECK(o["gdtf"] == "Generic@Spot_7ch.gdtf");
+    CHECK(tool(tools, "list_objects", {{"type", "fixture"}, {"patched", false}})["objects"].empty());
+    CHECK(tool(tools, "list_objects", {{"name", "no such name"}})["objects"].empty());
+
+    const json type = tool(tools, "get_fixture_type", {{"gdtf", "Generic@Spot_7ch.gdtf"}});
+    CHECK(type["hasBeam"] == true);
+    REQUIRE(type["modes"].size() >= 1);
+    CHECK(type["modes"][0]["channels"][0].contains("functions"));
+    CHECK_THROWS(tool(tools, "get_fixture_type", {{"gdtf", "Generic@Spot_7ch.gdtf"}, {"mode", "nope"}}));
+
+    const std::string uuid = spots[0]["uuid"];
+    const json fixture = tool(tools, "get_fixture", {{"uuid", uuid}});
+    CHECK(fixture["decoded"]["heads"].empty());
+    CHECK(fixture["channels"][0].contains("head"));
+
+    // set_fixture encodes through the GDTF: Dimmer 1 is 255 on the Dimmer channel's address.
+    const json set = tool(tools, "set_fixture", {{"uuid", uuid}, {"attributes", {{"Dimmer", 1}, {"Nope", 1}}}});
+    const json &written = set["fixtures"][0];
+    CHECK(written["unknown"] == json{"Nope"});
+    int dimmer_address = 0;
+    for (const json &c : fixture["channels"])
+        if (c["attribute"] == "Dimmer")
+            dimmer_address = c["address"];
+    REQUIRE(dimmer_address > 0);
+    CHECK(written["channels"][std::to_string(dimmer_address)] == 255);
+    CHECK(tool(tools, "clear_dmx")["cleared"] == "all");
+    CHECK(tool(tools, "apply_patch", {{"patch", json::array()}})["applied"] == 0);
+
+    CHECK(tool(tools, "get_project").contains("recentFiles"));
+    CHECK_THROWS_WITH(tool(tools, "frame", {{"uuids", {uuid}}}), "No viewport (the app runs without a window)");
+
+    s.setDebugMode(true, false);
+    tool(tools, "set_generator", {{"pattern", "full"}});
+    const json beams = tool(tools, "get_beams")["beams"];
+    for (const json &b : beams)
+        CHECK(b.contains("hit"));
+    CHECK(tool(tools, "get_beams", {{"uuid", "nope"}})["beams"].empty());
+    tool(tools, "set_generator", {{"pattern", "off"}});
+    s.setDebugMode(false, false);
+
+    const auto list = std::ranges::find(tools, std::string("list_files"), &sv::mcp::Tool::name);
+    REQUIRE(list != tools.end());
+    const auto dir = std::filesystem::temp_directory_path() / "sv_list_files";
+    std::filesystem::create_directories(dir / "sub");
+    std::ofstream(dir / "a.mvr") << "x";
+    std::ofstream(dir / "b.txt") << "y";
+    const json entries = tool(tools, "list_files", {{"path", dir.string()}, {"pattern", "*.mvr"}})["entries"];
+    REQUIRE(entries.size() == 2); // folders always show, so the caller can walk down
+    CHECK(entries[0]["folder"] == true);
+    CHECK(entries[1]["name"] == "a.mvr");
+    CHECK_THROWS(tool(tools, "list_files", {{"path", (dir / "missing").string()}}));
 }
 
 TEST_CASE("AI tools called from another thread run on the UI thread and wait for it") {
@@ -398,7 +600,13 @@ TEST_CASE("AI set_dmx holds values that get_dmx reads back merged; clear_dmx rel
     const auto tools = make_mcp_tools(s);
     CHECK(tool(tools, "set_dmx", {{"universe", 1}, {"address", 10}, {"values", {255, 7}}})["patched"] == true);
     CHECK_THROWS(tool(tools, "set_dmx", {{"universe", 1}, {"address", 512}, {"values", {1, 2}}}));
-    const auto read = [&] { return tool(tools, "get_dmx", {{"universe", 1}, {"from", 10}, {"count", 2}})["values"]; };
+    const auto read = [&] { // status lists the universe only once the network thread has subscribed it
+        try {
+            return tool(tools, "get_dmx", {{"universe", 1}, {"from", 10}, {"count", 2}})["values"];
+        } catch (const std::runtime_error &) {
+            return json();
+        }
+    };
     QElapsedTimer t;
     t.start();
     while (read() != json({255, 7}) && t.elapsed() < 3000)
@@ -579,6 +787,48 @@ TEST_CASE("Session drawings: sheet settings are one undo step, plan and front ma
     check_drawing_golden(s, "front");
 }
 
+TEST_CASE("Session drawings: the legend fills the strip left of the title block, the schedule narrows the drawing "
+          "(FR-19)") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const auto render = [&](sv::render::DrawingSheet sheet, QTransform *to_page = nullptr) {
+        const QSizeF mm = sv::render::sheet_size_mm(sheet);
+        QImage image(QSize(int(mm.width()), int(mm.height())), QImage::Format_RGBA8888);
+        image.fill(Qt::white);
+        QPainter p(&image);
+        const QTransform t = sv::render::paint_drawing(p, s.document().data(), *s.library_snapshot(), *s.meshes(),
+                                                       sheet);
+        p.end();
+        if (to_page)
+            *to_page = t;
+        return image;
+    };
+    const auto ink_in = [](const QImage &image, QRect r) {
+        int n = 0;
+        for (int y = r.top(); y <= r.bottom(); ++y)
+            for (int x = r.left(); x <= r.right(); ++x)
+                n += qGray(image.pixel(x, y)) < 240;
+        return n;
+    };
+    sv::render::DrawingSheet sheet = s.drawing_sheet("plan");
+    CHECK(sheet.legend);
+    CHECK_FALSE(sheet.schedule);
+    const QRect strip(20, 297 - 30, 200, 20); // A3: left of the 150 mm title block, above the frame's bottom
+    const int with_legend = ink_in(render(sheet), strip);
+    sheet.legend = false;
+    CHECK(with_legend > ink_in(render(sheet), strip) + 20);
+
+    QTransform plain, narrow;
+    render(sheet, &plain);
+    s.setDrawing("plan", "schedule", true);
+    sheet = s.drawing_sheet("plan");
+    REQUIRE(sheet.schedule);
+    render(sheet, &narrow);
+    // The demo rig is height-bound on A3, so the scale stays and the drawing moves left into the narrower area.
+    CHECK(narrow.m11() <= plain.m11());
+    CHECK(narrow.dx() < plain.dx() - 20);
+}
+
 TEST_CASE("Session exports drawings to a one-page A3 landscape PDF and to SVG (FR-19)") {
     const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
     std::filesystem::create_directories(dir);
@@ -608,6 +858,62 @@ TEST_CASE("Session exports drawings to a one-page A3 landscape PDF and to SVG (F
     CHECK(xml.contains("<svg"));
     CHECK(xml.contains("viewBox=\"0 0 420 297\""));
     CHECK(s.exportDrawing("plan", QUrl::fromLocalFile("/nonexistent/dir/x.pdf")).size() > 0);
+}
+
+TEST_CASE("Session drawings: notes and sheet options are one undo step each; SVG carries notes, labels optional "
+          "(FR-19)") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    s.setDrawing(
+        "plan", "notes",
+        QVariantList{QVariantMap{{"at", QVariantList{1, 2}}, {"text", "Rigging point A"}, {"to", QVariantList{0, 0}}}});
+    s.setDrawing("plan", "autoDimensions", false);
+    CHECK(s.drawing_sheet("plan").notes.size() == 1);
+    CHECK_FALSE(s.drawing_sheet("plan").auto_dimensions);
+    s.undo();
+    CHECK(s.drawing_sheet("plan").auto_dimensions);
+    CHECK(s.drawing_sheet("plan").notes.size() == 1);
+    s.undo();
+    CHECK(s.drawing_sheet("plan").notes.empty());
+    s.redo();
+
+    const auto svg_text = [&](const char *name) {
+        const QString svg = QString::fromStdString((dir / name).string());
+        REQUIRE(s.exportDrawing("plan", QUrl::fromLocalFile(svg)).isEmpty());
+        QFile f(svg);
+        REQUIRE(f.open(QIODevice::ReadOnly));
+        return f.readAll();
+    };
+    // The demo's first fixture ID as the painter letters it, as SVG text.
+    int first_id = 0;
+    for (const json &o : s.document().data()["objects"])
+        if (o["type"] == "fixture" && o["fixtureId"].is_number()) {
+            first_id = o["fixtureId"].get<int>();
+            break;
+        }
+    REQUIRE(first_id > 0);
+    const QByteArray id_text = ">" + QByteArray::number(first_id) + "<";
+    const QByteArray with_labels = svg_text("notes.svg");
+    CHECK(with_labels.contains("Rigging point A"));
+    CHECK(with_labels.contains(id_text));
+    s.setDrawing("plan", "labels", false);
+    const QByteArray without = svg_text("nolabels.svg");
+    CHECK(without.contains("Rigging point A"));
+    CHECK_FALSE(without.contains(id_text));
+
+    // MCP: the same keys, one AI undo step; export is gated by file access.
+    const auto tools = make_mcp_tools(s);
+    const json notes = json::array({{{"at", {0, 1}}, {"text", "Desk"}}});
+    const json after = tool(tools, "set_drawing", {{"kind", "plan"}, {"key", "notes"}, {"value", notes}});
+    CHECK(after["notes"] == notes);
+    CHECK(s.document().history()[s.document().cursor() - 1].label.starts_with("AI: "));
+    CHECK(tool(tools, "get_drawing", {{"kind", "plan"}})["labels"] == false);
+    const auto exporter =
+        std::find_if(tools.begin(), tools.end(), [](const auto &t) { return t.name == "export_drawing"; });
+    REQUIRE(exporter != tools.end());
+    CHECK_FALSE(exporter->available());
 }
 
 TEST_CASE("NDI loopback: a local sender is found, received as BGRA and followed through a size change (FR-13)",
@@ -675,6 +981,31 @@ TEST_CASE("NDI loopback: a local sender is found, received as BGRA and followed 
     CHECK(status.signal);
     CHECK(status.fps > 0);
     CHECK(status.latency_ms >= 0);
+
+    // Signal output: an NdiSender relays a source's frames under its own name.
+    {
+        sv::media::NdiSender relay("sv-relay");
+        relay.set_source(&media);
+        QString relayed;
+        QElapsedTimer found; // discovery answers at once with what it knows, so wait on the clock
+        for (found.start(); found.elapsed() < 8000 && relayed.isEmpty(); QThread::msleep(200))
+            for (const QString &source : sv::media::ndi_sources(500))
+                if (source.endsWith("(sv-relay)"))
+                    relayed = source;
+        REQUIRE_FALSE(relayed.isEmpty());
+        sv::media::MediaSource back;
+        back.open("ndi", relayed);
+        quint64 back_serial = 0;
+        QImage back_frame;
+        REQUIRE(spin(5000, 640, 360, 0xff00ff00u, [&] {
+            if (QImage image = back.latest(back_serial); !image.isNull())
+                back_frame = image;
+            return back_frame.size() == QSize(640, 360);
+        }));
+        CHECK(back_frame.pixelColor(10, 10).green() > 230);
+        CHECK(relay.fps() >= 0);
+        back.open({}, {});
+    }
 
     media.open({}, {}); // joins the receiver thread before the sender goes away
     ndi->send_destroy(sender);
@@ -753,4 +1084,566 @@ TEST_CASE("Session \"Don't save\" deletes the autosave, so discarded edits are n
     Session t(nullptr);
     REQUIRE(t.openProject(url).isEmpty());
     CHECK(t.recovery_file().isEmpty());
+}
+
+TEST_CASE("FR-4 saveFixtureType adds a usable type, refuses bundled names, and the package carries it unused") {
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    const QVariantMap bundled = s.fixtureSpec("Generic@Spot_7ch.gdtf");
+    CHECK(bundled["bundled"].toBool());
+    CHECK(bundled["warnings"].toStringList().isEmpty());
+    const QStringList pixel = s.fixtureSpec("Generic@Pixel_Bar_8.gdtf")["warnings"].toStringList();
+    CHECK(pixel.join(' ').contains("merged")); // 8 cells of RGB become one RGB
+    CHECK(bundled["channels"].toList().size() >= 5);
+
+    QVariantMap spec = bundled;
+    CHECK(s.saveFixtureType(spec) == "Bundled types are read-only; change the name");
+    spec["name"] = "My Spot";
+    spec["manufacturer"] = "Acme";
+    spec["emitter"] = "#ff8000";
+    QVariantList channels{QVariantMap{{"attribute", "Dimmer"}, {"bits", 8}},
+                          QVariantMap{{"attribute", "Pan"}, {"bits", 16}, {"default", 32768}},
+                          QVariantMap{{"attribute", "Color1"}, {"bits", 8}}};
+    spec["channels"] = channels;
+    REQUIRE(s.saveFixtureType(spec).isEmpty());
+    CHECK(s.fixture_types().contains("Acme@My_Spot.gdtf"));
+    CHECK(s.modes("Acme@My_Spot.gdtf") == QStringList{"Default"});
+
+    const QVariantMap back = s.fixtureSpec("Acme@My_Spot.gdtf");
+    CHECK_FALSE(back["bundled"].toBool());
+    CHECK(back["name"] == "My Spot");
+    CHECK(back["emitter"] == "#ff8000");
+    const QVariantList ch = back["channels"].toList();
+    REQUIRE(ch.size() == 3);
+    CHECK(ch[1].toMap()["bits"] == 16);
+    CHECK(ch[1].toMap()["default"] == 32768);
+    CHECK(ch[1].toMap()["physicalFrom"] == -270);
+    CHECK(s.addFixtureArray("Acme@My_Spot.gdtf", "Default", 2, {0.0, 4.0, 0.0}, {1.0, 0.0, 0.0}, "1.1", "").isEmpty());
+    const json &f = s.document().data()["objects"].back();
+    CHECK(f["patch"] == json{{"universe", 1}, {"address", 5}}); // 1 + 2 + 1 channels after 1.001
+
+    s.deleteSelection(); // unused types still travel with the project
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "built.svproj";
+    REQUIRE(s.saveProject(QUrl::fromLocalFile(QString::fromStdString(path.string()))).isEmpty());
+    CHECK(sv::load_package(path).files.contains("gdtf/Acme@My_Spot.gdtf"));
+    CHECK_FALSE(sv::load_package(path).files.contains("gdtf/Generic@Spot_7ch.gdtf"));
+
+    CHECK_FALSE(s.saveFixtureType(QVariantMap{{"name", "X"}, {"manufacturer", "Y"}}).isEmpty()); // no channels
+    spec["channels"] = QVariantList{QVariantMap{{"attribute", "Dimmer"}}, QVariantMap{{"attribute", "Dimmer"}}};
+    CHECK_FALSE(s.saveFixtureType(spec).isEmpty());
+}
+
+TEST_CASE("Show recording captures the merged DMX and plays it back over live input, also through MCP") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    s.start_dmx();
+    const auto dir = std::filesystem::temp_directory_path() / "sv_show_recording";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const QString base = QString::fromStdString((dir / "show").string());
+    const auto wait = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    };
+    const int u = s.universes().at(0).toInt();
+    const auto universe_status = [&] {
+        for (const auto &st : s.dmx().status())
+            if (st.universe == u)
+                return st;
+        FAIL("universe " << u << " not patched");
+        throw;
+    };
+    const auto lit = [&] { return std::ranges::any_of(universe_status().data, [](auto v) { return v != 0; }); };
+
+    s.set_generator(sv::proto::Pattern::full);
+    REQUIRE(s.startRecording(QUrl::fromLocalFile(base), false).isEmpty());
+    CHECK(s.recording()["active"].toBool());
+    CHECK(s.startPlayback(QUrl::fromLocalFile(base + ".svdmx")) == "Stop recording before playing back");
+    wait(1500);
+    s.stopRecording();
+    s.set_generator(sv::proto::Pattern::off);
+    CHECK_FALSE(s.recording()["active"].toBool());
+    CHECK(std::filesystem::exists(dir / "show.svdmx"));
+    CHECK_FALSE(std::filesystem::exists(dir / "show.mp4")); // no live media source
+    wait(200);
+    CHECK_FALSE(lit());
+
+    REQUIRE(s.startPlayback(QUrl::fromLocalFile(base + ".svdmx")).isEmpty());
+    CHECK(s.recording()["duration"].toLongLong() > 1000);
+    CHECK_FALSE(s.recording()["hasVideo"].toBool());
+    wait(200);
+    CHECK(lit());
+    CHECK(universe_status().sources == std::vector<std::string>{"Playback"});
+    s.stopPlayback();
+    wait(200);
+    CHECK_FALSE(lit());
+
+    // The same through MCP, merging instead of replacing; record needs file access.
+    const auto tools = make_mcp_tools(s);
+    const auto play = std::ranges::find(tools, std::string("play"), &sv::mcp::Tool::name);
+    REQUIRE(play != tools.end());
+    const json state =
+        tool(tools, "play", {{"path", (dir / "show.svdmx").string()}, {"replace", false}, {"seek", 500}});
+    CHECK(state["playing"] == true);
+    CHECK(state["replace"] == false);
+    wait(200);
+    CHECK(lit());
+    CHECK(tool(tools, "get_recording")["playing"] == true);
+    json scoped = tool(tools, "play", {{"scopes", {{"default", "live"}}}, {"fade", 0.5}});
+    CHECK(scoped["fade"] == 0.5);
+    CHECK(scoped["scopes"]["default"] == "live");
+    wait(200);
+    CHECK_FALSE(lit()); // everything live, and live is dark
+    scoped = tool(tools, "play", {{"scopes", {{"default", {{"mode", "recording"}, {"fade", 0}}}}}, {"fade", 1}});
+    CHECK(scoped["fades"]["default"] == 0);
+    wait(200);
+    CHECK_FALSE(lit()); // the part's own fader is down
+    tool(tools, "play", {{"scopes", {{"default", {{"mode", "recording"}, {"fade", nullptr}}}}}, {"fade", 1}});
+    wait(200);
+    CHECK(lit());
+
+    // Proxy: what the view shows goes out; status reports it under get_recording.output.
+    json out = tool(tools, "set_output", {{"enabled", true}, {"target", "127.0.0.1"}, {"offset", 100}});
+    CHECK(out["enabled"] == true);
+    CHECK(out["offset"] == 100);
+    wait(1200);
+    CHECK(tool(tools, "get_recording")["output"]["universes"].get<int>() > 0);
+    CHECK(tool(tools, "set_output", {{"enabled", false}})["enabled"] == false);
+    CHECK(tool(tools, "play", {{"stop", true}})["playing"] == false);
+    CHECK_THROWS_WITH(tool(tools, "play", {{"path", (dir / "missing.svdmx").string()}}), "Cannot open missing.svdmx");
+
+    // With a live media source the picture goes to an .mp4 beside it (an H.264 encoder must exist).
+    REQUIRE(s.setMediaFile("video", QUrl::fromLocalFile(SV_SOURCE_DIR "/tests/fixtures/media/testsrc.mp4")).isEmpty());
+    wait(500);
+    REQUIRE(s.startRecording(QUrl::fromLocalFile(base + "2.svdmx"), false).isEmpty());
+    CHECK(s.recording()["hasVideo"].toBool());
+    wait(1500);
+    s.stopRecording();
+    wait(500);
+    INFO(s.recording()["error"].toString().toStdString());
+    CHECK(std::filesystem::exists(dir / "show2.mp4"));
+    CHECK(sv::DmxRecording::load(dir / "show2.svdmx").state_at(0).contains(std::uint16_t(u))); // seeded at t = 0
+
+    REQUIRE(s.startPlayback(QUrl::fromLocalFile(base + "2.svdmx")).isEmpty());
+    CHECK(s.recording()["hasVideo"].toBool());
+    s.stopPlayback();
+    CHECK(s.media().active()); // the project's own source again
+}
+
+TEST_CASE("Playback chases Art-Net timecode minus the offset, holds without it and never loops") {
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    {
+        sv::DmxRecordWriter w(dir / "chase.svdmx");
+        sv::DmxSlots slots{};
+        for (std::uint32_t t : {0u, 400u, 1000u}) {
+            slots[0] = std::uint8_t(t / 5);
+            w.write(t, 1, slots);
+        }
+        w.close();
+    }
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    CHECK_FALSE(s.setPlaybackChase(true, "1:00").isEmpty()); // neither HH:MM:SS nor HH:MM:SS:FF
+    REQUIRE(s.startPlayback(QUrl::fromLocalFile(QString::fromStdString((dir / "chase.svdmx").string()))).isEmpty());
+    REQUIRE(s.setPlaybackChase(true, "01:00:00:00").isEmpty());
+    CHECK(s.recording()["chase"].toBool());
+    s.chase_timecode(3'600'400);
+    CHECK(s.recording()["t"].toLongLong() == 400);
+    s.chase_timecode(-1); // timecode stopped: hold
+    CHECK(s.recording()["t"].toLongLong() == 400);
+    s.chase_timecode(3'599'000); // before the offset: the start
+    CHECK(s.recording()["t"].toLongLong() == 0);
+    s.chase_timecode(3'700'000); // past the end: the last frame, no loop
+    CHECK(s.recording()["t"].toLongLong() == 1000);
+    REQUIRE(s.setPlaybackChase(false, "").isEmpty());
+    CHECK(s.recording()["chaseOffset"].toLongLong() == 3'600'000);
+    CHECK(s.recording()["t"].toLongLong() >= 1000); // carries on from the timecode's place
+    s.stopPlayback();
+}
+
+TEST_CASE("Playback scopes: fixture over group over output over default; dimmers fade, wheels snap") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const json &objects = s.document().data().at("objects");
+    const auto find = [&](const std::string &gdtf, int nth = 0) -> const json & {
+        for (const json &o : objects)
+            if (o.value("gdtf", std::string()) == gdtf && nth-- == 0)
+                return o;
+        FAIL("no " << gdtf);
+        throw;
+    };
+    const auto slot = [&](const json &o, const std::string &attr) {
+        const auto *mode = s.library().at(o["gdtf"].get<std::string>()).mode(o["mode"].get<std::string>());
+        for (const auto &ch : mode->channels)
+            if (ch.attribute() == attr)
+                return std::pair{std::uint16_t(o["patch"]["universe"]), int(o["patch"]["address"]) - 1 + ch.offsets[0]};
+        FAIL(attr);
+        throw;
+    };
+    const auto weight = [&](std::pair<std::uint16_t, int> at) {
+        return int(s.playback_mix().at(at.first).weight[at.second]);
+    };
+
+    const json &beam = find("Generic@Beam_5ch.gdtf"), &beam2 = find("Generic@Beam_5ch.gdtf", 1);
+    const json &wash = find("Generic@Wash_RGBW.gdtf");
+    const auto dimmer = slot(beam, "Dimmer"), wheel = slot(beam, "Color1"), gobo = slot(beam, "Gobo1");
+    const auto &mix = s.playback_mix().at(dimmer.first);
+    CHECK_FALSE(mix.snap[dimmer.second]);
+    CHECK(mix.snap[wheel.second]);
+    CHECK(mix.snap[gobo.second]);
+    CHECK(mix.snap[511]); // unpatched slots switch
+    CHECK(weight(dimmer) == 255);
+
+    QString beams;
+    for (const QVariant &g : s.control_groups())
+        if (g.toMap()["kind"] == "type" && g.toMap()["name"] == "Beam 5ch")
+            beams = g.toMap()["key"].toString();
+    REQUIRE_FALSE(beams.isEmpty());
+    s.setPlaybackScope(beams, "live");
+    CHECK(weight(dimmer) == 0);
+    CHECK(weight(slot(beam2, "Dimmer")) == 0);
+    CHECK(weight(slot(wash, "Dimmer")) == 255);
+    s.setPlaybackScope(QString::fromStdString(beam["uuid"]), "both"); // the fixture beats its group
+    CHECK(weight(dimmer) == 255);
+    CHECK(s.playback_mix().at(dimmer.first).htp[dimmer.second]);
+    CHECK(weight(slot(beam2, "Dimmer")) == 0);
+    s.setPlaybackScope("default", "live");
+    CHECK(weight(slot(wash, "Dimmer")) == 0);
+    s.setPlaybackScope("default", ""); // the default stays
+    CHECK(s.recording()["scopes"].toMap()["default"] == "live");
+    s.setPlaybackScope(QString::fromStdString(beam["uuid"]), "");
+    CHECK(weight(dimmer) == 0);
+    s.setPlaybackFade(2);
+    CHECK(s.recording()["fade"].toDouble() == 1);
+
+    // Each part's own fader, resolved like the modes but independently of them
+    s.setPlaybackScope("default", "recording");
+    s.setPlaybackScope(beams, "");
+    s.setPlaybackScopeFade(beams, 0.5);
+    CHECK(weight(dimmer) == 128);
+    CHECK(weight(slot(beam2, "Dimmer")) == 128);
+    CHECK(weight(slot(wash, "Dimmer")) == 255);
+    s.setPlaybackScopeFade(QString::fromStdString(beam["uuid"]), 0.2); // the fixture beats its group
+    CHECK(weight(dimmer) == 51);
+    CHECK(weight(slot(beam2, "Dimmer")) == 128);
+    s.setPlaybackScope(beams, "live"); // a Live mode still wins over any fader
+    CHECK(weight(dimmer) == 0);
+    s.setPlaybackScope(beams, "");
+    s.setPlaybackScopeFade("default", 0.4);
+    CHECK(weight(slot(wash, "Dimmer")) == 102);
+    CHECK(weight(slot(beam2, "Dimmer")) == 128);
+    s.setPlaybackScopeFade(QString::fromStdString(beam["uuid"]), -1); // dropped: back to the group's
+    CHECK(weight(dimmer) == 128);
+    CHECK(s.recording()["fades"].toMap()[beams].toDouble() == 0.5);
+
+    s.set_project(sv::demo_project()); // live state, cleared on open
+    CHECK(s.recording()["scopes"].toMap().size() == 1);
+    CHECK(s.recording()["fades"].toMap().isEmpty());
+}
+
+TEST_CASE("Locate holds fixtures white at full and gives back what was held before") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    QStringList fixtures;
+    for (const json &o : s.document().data().at("objects"))
+        if (o["type"] == "fixture" && fixtures.size() < 2)
+            fixtures << QString::fromStdString(o["uuid"].get<std::string>());
+    REQUIRE(fixtures.size() == 2);
+    s.setLight({fixtures[0]}, {{"Pan", 0.3}, {"Dimmer", 0.2}});
+    s.locate(fixtures, true);
+    CHECK(s.located().size() == 2);
+    auto held = s.programmer()[fixtures[0]].toMap();
+    CHECK(held["Dimmer"].toDouble() == 1);
+    CHECK(held["ColorAdd_R"].toDouble() == 1);
+    s.locate(fixtures, false);
+    CHECK(s.located().isEmpty());
+    held = s.programmer()[fixtures[0]].toMap();
+    CHECK(held["Pan"].toDouble() == Catch::Approx(0.3));
+    CHECK(held["Dimmer"].toDouble() == Catch::Approx(0.2)); // restored, not dropped
+    CHECK_FALSE(held.contains("ColorAdd_R"));
+    CHECK_FALSE(s.programmer().contains(fixtures[1])); // nothing held before: released
+}
+
+TEST_CASE("Looks store the programmer in the project and recall it, skipping fixtures deleted since") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    QStringList fixtures;
+    for (const json &o : s.document().data().at("objects"))
+        if (o["type"] == "fixture" && fixtures.size() < 2)
+            fixtures << QString::fromStdString(o["uuid"].get<std::string>());
+    REQUIRE(fixtures.size() == 2);
+    s.setLight({fixtures[0]}, {{"Pan", 0.3}});
+    s.setLight({fixtures[1]}, {{"Dimmer", 0.7}});
+    const QVariantMap snapshot = s.programmer();
+    CHECK_FALSE(s.saveLook("  ").isEmpty());
+    REQUIRE(s.saveLook("Warm").isEmpty());
+    REQUIRE(s.looks().size() == 1);
+    const QString look = s.looks()[0].toMap()["uuid"].toString();
+    s.releaseLights({});
+    CHECK(s.programmer().isEmpty());
+    s.recallLook(look);
+    CHECK(s.programmer() == snapshot);
+
+    s.releaseLights({});
+    s.selectUuids({fixtures[1]});
+    s.deleteSelection();
+    s.recallLook(look);
+    CHECK(s.programmer().keys() == QStringList{fixtures[0]});
+    s.deleteLook(look);
+    CHECK(s.looks().isEmpty());
+}
+
+TEST_CASE("setLight on one head holds it under heads; the fixture-wide dimmer stays whole") {
+    const std::string xml = R"(<GDTF><FixtureType Name="Twin" Manufacturer="Test"><Geometries><Geometry Name="Base">
+        <Axis Name="Yoke 1"><Axis Name="Head 1"><GeometryReference Name="Px 1" Geometry="Pixel">
+          <Break DMXBreak="1" DMXOffset="4"/></GeometryReference></Axis></Axis>
+        <Axis Name="Yoke 2"><Axis Name="Head 2"><GeometryReference Name="Px 2" Geometry="Pixel">
+          <Break DMXBreak="1" DMXOffset="6"/></GeometryReference></Axis></Axis>
+        </Geometry><Geometry Name="Pixel"><Beam Name="LED"/></Geometry></Geometries>
+        <DMXModes><DMXMode Name="m" Geometry="Base"><DMXChannels>
+        <DMXChannel Offset="1" Geometry="Base"><LogicalChannel><ChannelFunction Attribute="Dimmer"/></LogicalChannel></DMXChannel>
+        <DMXChannel Offset="2" Geometry="Yoke 1"><LogicalChannel><ChannelFunction Attribute="Pan" PhysicalFrom="-270" PhysicalTo="270"/></LogicalChannel></DMXChannel>
+        <DMXChannel Offset="3" Geometry="Yoke 2"><LogicalChannel><ChannelFunction Attribute="Pan" PhysicalFrom="-270" PhysicalTo="270"/></LogicalChannel></DMXChannel>
+        <DMXChannel Offset="1" Geometry="Pixel" DMXBreak="1"><LogicalChannel><ChannelFunction Attribute="ColorAdd_R"/></LogicalChannel></DMXChannel>
+        <DMXChannel Offset="2" Geometry="Pixel" DMXBreak="1"><LogicalChannel><ChannelFunction Attribute="ColorAdd_B"/></LogicalChannel></DMXChannel>
+        </DMXChannels></DMXMode></DMXModes></FixtureType></GDTF>)";
+    const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
+    std::filesystem::create_directories(dir);
+    const auto zip = sv::write_zip({{"description.xml", std::vector<std::uint8_t>(xml.begin(), xml.end())}});
+    std::ofstream(dir / "Test@Twin.gdtf", std::ios::binary).write(reinterpret_cast<const char *>(zip.data()),
+                                                                     std::streamsize(zip.size()));
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    REQUIRE(s.importGdtf(QUrl::fromLocalFile(QString::fromStdString((dir / "Test@Twin.gdtf").string()))).isEmpty());
+    REQUIRE(s.addObject("fixture", {{"gdtf", "Test@Twin.gdtf"},
+                                    {"mode", "m"},
+                                    {"patch", QVariantMap{{"universe", 1}, {"address", 1}}}})
+                .isEmpty());
+    const QString fx = selected(s);
+    CHECK(s.controlHeads({fx}) == 2);
+
+    s.setLight({fx}, {{"ColorAdd_R", 1.0}, {"Dimmer", 1.0}}, 1);
+    s.setLight({fx}, {{"ColorAdd_B", 1.0}}, 0);
+    const json held = sv::json::parse(QJsonDocument::fromVariant(s.programmer()[fx]).toJson().toStdString());
+    CHECK(held["Dimmer"] == 1.0); // no Dimmer channel on a head: fixture-wide
+    CHECK(held["heads"]["1"] == json{{"ColorAdd_R", 1.0}});
+    CHECK(held["heads"]["0"] == json{{"ColorAdd_B", 1.0}});
+
+    // What push_programmer sends decodes to a blue head 0 and a red head 1.
+    const auto &type = s.library().at("Test@Twin.gdtf");
+    std::array<std::uint8_t, 512> frame{};
+    for (const auto &[attrs, head] : {std::pair{json{{"Dimmer", 1.0}}, -1}, {held["heads"]["0"], 0},
+                                      {held["heads"]["1"], 1}})
+        for (const auto &b : s.encode_fixture(fx.toStdString(), attrs, head, false).bytes)
+            frame[b.offset] = b.value;
+    const auto a = sv::gdtf::decode(type, *type.mode("m"), frame, 1);
+    REQUIRE(a.heads.size() == 2);
+    CHECK(a.heads[0].colour[2] > 0.9f);
+    CHECK(a.heads[0].colour[0] < 0.1f);
+    CHECK(a.heads[1].colour[0] > 0.9f);
+    CHECK(a.heads[1].colour[2] < 0.1f);
+
+    s.setLight({fx}, {{"ColorAdd_B", QVariant()}}, 0); // a null drops it, and the empty head goes
+    CHECK_FALSE(s.programmer()[fx].toMap()["heads"].toMap().contains("0"));
+}
+
+TEST_CASE("editSelection sets a field on the selection in one undo step, filtered by type; fitVenue") {
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    REQUIRE(s.addObject("shape", {}).isEmpty());
+    const QString a = selected(s);
+    REQUIRE(s.addObject("shape", {}).isEmpty());
+    const QString b = selected(s);
+    REQUIRE(s.addObject("deck", {{"position", QVariantList{9.0, 0.0, 0.0}}, {"width", 4.0}, {"height", 1.0}}).isEmpty());
+    const QString d = selected(s);
+    s.selectUuids({a, b, d});
+    const auto steps = s.document().history().size();
+    CHECK(s.editSelection("/color", "#112233", "shape").isEmpty());
+    CHECK(s.document().history().size() == steps + 1);
+    CHECK(object(s, a)["color"] == "#112233");
+    CHECK(object(s, b)["color"] == "#112233");
+    CHECK_FALSE(object(s, d).contains("color"));
+    CHECK(s.editSelection("/layer", "L1").isEmpty());
+    for (const QString &u : {a, b, d})
+        CHECK(object(s, u)["layer"] == "L1");
+    s.undo();
+    CHECK(object(s, d).value("layer", json()) != "L1");
+
+    CHECK(s.fitVenue().isEmpty()); // the deck reaches x = 11
+    CHECK(s.document().data()["venue"]["width"] == 22.0);
+    CHECK(s.document().history().back().label == "Fit venue");
+}
+
+TEST_CASE("Light control holds touched attributes over live input, by type, rig and saved group") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    s.start_dmx();
+    const auto wait = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    };
+    const auto decoded = [&] {
+        const auto status = s.dmx().status();
+        return sv::render::decode_fixtures(s.document().data(), s.library(), [&](std::uint16_t u) {
+            for (const auto &st : status)
+                if (st.universe == u)
+                    return std::span<const std::uint8_t>(st.data);
+            return std::span<const std::uint8_t>();
+        });
+    };
+    const auto group = [&](const QString &kind, const QString &name) {
+        for (const QVariant &g : s.control_groups())
+            if (g.toMap()["kind"] == kind && g.toMap()["name"] == name)
+                return g.toMap()["uuids"].toStringList();
+        FAIL("no " << kind.toStdString() << " group " << name.toStdString());
+        throw;
+    };
+
+    // A rig group reaches fixtures through their parent chain; types group by GDTF.
+    const json &objects = s.document().data().at("objects");
+    std::vector<std::string> washes, spots;
+    for (const json &o : objects)
+        if (o.value("gdtf", std::string()).find("Wash") != std::string::npos)
+            washes.push_back(o["uuid"]);
+        else if (o.value("gdtf", std::string()).find("Spot") != std::string::npos)
+            spots.push_back(o["uuid"]);
+    REQUIRE(washes.size() >= 2);
+    json patch = json::array({{{"op", "add"},
+                               {"path", "/objects/-"},
+                               {"value", {{"uuid", "g-truss"}, {"type", "group"}, {"name", "Back truss"}}}}});
+    for (const std::string &w : washes) {
+        const auto at = std::find_if(objects.begin(), objects.end(), [&](const json &o) { return o["uuid"] == w; });
+        const auto i = at - objects.begin();
+        patch.push_back({{"op", "add"}, {"path", "/objects/" + std::to_string(i) + "/parent"}, {"value", "g-truss"}});
+    }
+    REQUIRE(s.try_apply(patch, "group").empty());
+    const QStringList truss = group("rig", "Back truss");
+    CHECK(truss.size() == int(washes.size()));
+    CHECK(group("type", "Spot 7ch").size() == int(spots.size()));
+
+    // Held attributes win over the generator on their slots only, and colour reaches only fixtures that have it.
+    s.set_generator(sv::proto::Pattern::off);
+    s.setLight(truss, {{"Dimmer", 1.0}, {"ColorAdd_R", 1.0}, {"ColorAdd_G", 0.0}, {"ColorAdd_B", 0.0}});
+    s.setLight(group("type", "Spot 7ch"), {{"Dimmer", 0.5}, {"ColorAdd_R", 1.0}});
+    wait(200);
+    auto st = decoded();
+    CHECK(st.at(washes[0]).attrs.dimmer == Catch::Approx(1).margin(0.01));
+    CHECK(st.at(washes[0]).attrs.colour[0] > 0.9f);
+    CHECK(st.at(washes[0]).attrs.colour[1] < 0.1f);
+    CHECK(st.at(spots[0]).attrs.dimmer == Catch::Approx(0.5).margin(0.01));
+    CHECK(s.programmer().size() == int(washes.size() + spots.size()));
+    CHECK(s.controlAttributes(truss).contains("ColorAdd_R"));
+    CHECK_FALSE(s.controlAttributes(group("type", "Blinder")).contains("ColorAdd_R"));
+
+    s.set_generator(sv::proto::Pattern::full); // live input: untouched attributes follow, held ones stay
+    s.setLight(truss, {{"Dimmer", 0.25}});
+    wait(300);
+    st = decoded();
+    CHECK(st.at(washes[0]).attrs.dimmer == Catch::Approx(0.25).margin(0.01));
+    CHECK(st.at(spots[0]).attrs.dimmer == Catch::Approx(0.5).margin(0.01));
+    s.setLight(truss, {{"Dimmer", QVariant()}}); // drop one attribute back to live
+    wait(200);
+    CHECK(decoded().at(washes[0]).attrs.dimmer == Catch::Approx(1).margin(0.01));
+    s.releaseLights({});
+    wait(200);
+    CHECK(s.programmer().isEmpty());
+    CHECK(decoded().at(spots[0]).attrs.dimmer == Catch::Approx(1).margin(0.01));
+    s.set_generator(sv::proto::Pattern::off);
+
+    // Saved groups live in the project, one undo step each.
+    CHECK_FALSE(s.saveGroup(" ", truss).isEmpty());
+    REQUIRE(s.saveGroup("Washes", truss).isEmpty());
+    CHECK(group("saved", "Washes") == truss);
+    s.undo();
+    CHECK_FALSE(s.document().data().contains("groups"));
+    s.redo();
+    s.deleteGroup(QString::fromStdString(s.document().data()["groups"][0]["uuid"]));
+    CHECK(s.document().data()["groups"].empty());
+}
+
+TEST_CASE("FR-13 each Resolume output takes its own feed; NDI senders match by stream name") {
+    const QString arena = QStringLiteral(SV_SOURCE_DIR "/tests/fixtures/resolume/arena-7.17-futro-ajki26.xml");
+    Session s(nullptr);
+    s.set_project(sv::new_project());
+    REQUIRE(s.importResolume(QUrl::fromLocalFile(arena)).isEmpty());
+    const json outputs = s.document().data()["outputs"];
+    std::string novastar, linsn;
+    for (const json &o : outputs) {
+        if (o["name"] == "NDI NOVASTAR")
+            novastar = o["uuid"];
+        if (o["name"] == "NDI LINSN TECHWALL ROMBY")
+            linsn = o["uuid"];
+    }
+    REQUIRE_FALSE(novastar.empty());
+    REQUIRE_FALSE(linsn.empty());
+
+    const auto matches = Session::match_ndi_feeds(
+        outputs, {"MEDIA-PC (NDI NOVASTAR)", "MEDIA-PC (Arena - Composition)", "OTHER (NDI LINSN TECHWALL ROMBY)"});
+    CHECK(matches.size() == 2);
+    CHECK(matches.at(novastar) == "MEDIA-PC (NDI NOVASTAR)");
+    CHECK(matches.at(linsn) == "OTHER (NDI LINSN TECHWALL ROMBY)");
+    CHECK(Session::match_ndi_feeds(outputs, {"MEDIA-PC (Something else)"}).empty());
+
+    CHECK(s.feed_sources().empty());
+    s.edit(QString::fromStdString(novastar), "/feed",
+           QVariantMap{{"kind", "ndi"}, {"name", "MEDIA-PC (NDI NOVASTAR)"}});
+    s.edit(QString::fromStdString(linsn), "/feed",
+           QVariantMap{{"kind", "ndi"}, {"name", "x (NDI LINSN TECHWALL ROMBY)"}});
+    CHECK(s.feed_sources().size() == 2);
+    int fed = 0, lumiverse = 0;
+    for (const QVariant &row : s.feed_status()) {
+        const QVariantMap r = row.toMap();
+        fed += r["feedKind"] == "ndi";
+        lumiverse += r["kind"] == "lumiverse" && r["universe"].toInt() > 0;
+    }
+    CHECK(fed == 2);
+    CHECK(lumiverse == 8);
+
+    const auto before = s.feed_sources();
+    s.undo();
+    REQUIRE(s.feed_sources().size() == 1);
+    CHECK(s.feed_sources()[0].first == novastar);
+    s.edit(QString::fromStdString(linsn), "/feed", QVariantMap{{"kind", "ndi"}, {"name", "y"}});
+    std::set<const sv::media::MediaSource *> pooled; // the closed source is reused, never deleted
+    for (const auto &[uuid, source] : before)
+        pooled.insert(source);
+    for (const auto &[uuid, source] : s.feed_sources())
+        CHECK(pooled.contains(source));
+}
+
+TEST_CASE("FR-5 view keys: numpad, emulation, presets and the card") {
+    using sv::app::ViewAction, sv::app::find_view_key;
+    for (bool blender : {true, false}) {
+        REQUIRE(find_view_key(Qt::Key_4, Qt::NoModifier, true, blender, false));
+        CHECK(find_view_key(Qt::Key_4, Qt::NoModifier, true, blender, false)->action == ViewAction::orbit);
+        CHECK_FALSE(find_view_key(Qt::Key_4, Qt::NoModifier, false, blender, false));
+        CHECK(find_view_key(Qt::Key_4, Qt::NoModifier, false, blender, true)->action == ViewAction::orbit);
+        CHECK(find_view_key(Qt::Key_8, Qt::ControlModifier, true, blender, false)->action == ViewAction::pan);
+        CHECK(find_view_key(Qt::Key_Equal, Qt::NoModifier, false, blender, true)->action == ViewAction::zoom);
+        CHECK(find_view_key(Qt::Key_Minus, Qt::NoModifier, true, blender, false)->x < 0);
+        CHECK_FALSE(find_view_key(Qt::Key_Left, Qt::AltModifier, false, blender, false)); // Alt+arrows nudge
+        CHECK(find_view_key(Qt::Key_Left, Qt::NoModifier, true, blender, false)->action == ViewAction::orbit); // macOS
+    }
+    CHECK(find_view_key(Qt::Key_A, Qt::NoModifier, false, true, false)->action == ViewAction::select_all);
+    CHECK(find_view_key(Qt::Key_A, Qt::NoModifier, false, false, false)->action == ViewAction::frame_all);
+    CHECK(find_view_key(Qt::Key_R, Qt::NoModifier, false, true, false)->action == ViewAction::transform);
+    CHECK(find_view_key(Qt::Key_R, Qt::NoModifier, false, false, false)->action == ViewAction::gizmo);
+
+    // The card lists every group, in order.
+    for (bool blender : {true, false}) {
+        const QVariantList rows = sv::app::view_key_help(blender);
+        REQUIRE(rows.size() > 20);
+        QStringList groups;
+        for (const QVariant &r : rows)
+            if (groups.isEmpty() || groups.last() != r.toMap()["group"].toString())
+                groups << r.toMap()["group"].toString();
+        CHECK(groups == QStringList{"Camera", "View", "Fly", "Edit", "Modal"});
+    }
 }

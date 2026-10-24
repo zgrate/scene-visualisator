@@ -1,4 +1,5 @@
 #include "media/ndi.h"
+#include "media/media_source.h"
 
 #include <QDir>
 #include <QLibrary>
@@ -78,6 +79,48 @@ NdiReceiver::NdiReceiver(const QString &source, std::function<void(QImage)> on_f
 }
 
 NdiReceiver::~NdiReceiver() {
+    stop_ = true;
+    if (thread_.joinable())
+        thread_.join();
+}
+
+NdiSender::NdiSender(const QString &name) {
+    const NDIlib_v6 *ndi = ndi_api();
+    if (!ndi)
+        return;
+    thread_ = std::thread([this, ndi, name = name.toStdString()] {
+        NDIlib_send_create_t settings(name.c_str(), nullptr, false, false);
+        NDIlib_send_instance_t send = ndi->send_create(&settings);
+        if (!send)
+            return;
+        quint64 serial = 0;
+        const MediaSource *last = nullptr;
+        int sent = 0;
+        auto window = std::chrono::steady_clock::now();
+        while (!stop_) {
+            const MediaSource *source = source_;
+            if (source != last)
+                serial = 0, last = source; // a new source's current frame goes out at once
+            QImage frame = source ? source->latest(serial) : QImage();
+            if (frame.isNull()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            } else {
+                frame = std::move(frame).convertToFormat(QImage::Format_ARGB32); // BGRA in memory
+                NDIlib_video_frame_v2_t video(frame.width(), frame.height(), NDIlib_FourCC_video_type_BGRA);
+                video.p_data = frame.bits();
+                video.line_stride_in_bytes = int(frame.bytesPerLine());
+                video.frame_rate_N = 60000, video.frame_rate_D = 1001; // nominal: frames go out as they arrive
+                ndi->send_send_video_v2(send, &video);
+                ++sent;
+            }
+            if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(1))
+                fps_ = sent / std::chrono::duration<double>(now - window).count(), sent = 0, window = now;
+        }
+        ndi->send_destroy(send);
+    });
+}
+
+NdiSender::~NdiSender() {
     stop_ = true;
     if (thread_.joinable())
         thread_.join();

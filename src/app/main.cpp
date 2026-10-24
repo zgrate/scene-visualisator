@@ -109,8 +109,10 @@ int main(int argc, char *argv[]) {
     QCommandLineOption generator("generator", "Run an internal test pattern: off, full, chase, rainbow, sweep.",
                                  "pattern", "off");
     args.addOption(generator);
-    QCommandLineOption screen("screen", "Start on a screen: design, patch, dmx, plan, mapping, project.", "name",
-                              "design");
+    QCommandLineOption screen(
+        "screen",
+        "Start on a screen: design, build (design with the Build palette), patch, dmx, control, plan, mapping, project.", "name",
+        "design");
     args.addOption(screen);
     QCommandLineOption mcp("mcp", "Turn AI access (MCP) on for this run, whatever the preference says.");
     args.addOption(mcp);
@@ -146,8 +148,11 @@ int main(int argc, char *argv[]) {
         Qt::QueuedConnection);
     engine.loadFromModule("SceneVisualiser", "Main");
     if (!engine.rootObjects().isEmpty()) {
-        engine.rootObjects().first()->setProperty("screen", args.value(screen));
-        session.set_window(qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+        QObject *root = engine.rootObjects().first();
+        const bool build = args.value(screen) == "build";
+        root->setProperty("screen", build ? QStringLiteral("design") : args.value(screen));
+        root->setProperty("build", build);
+        session.set_window(qobject_cast<QQuickWindow *>(root));
     }
     if (args.isSet(debug) || Session::preference("debug", false).toBool())
         session.setDebugMode(true, false);

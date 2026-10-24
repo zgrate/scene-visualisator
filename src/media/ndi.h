@@ -1,5 +1,5 @@
 #pragma once
-// FR-13 NDI input. The runtime is loaded at run time (never linked or shipped): from $NDI_RUNTIME_DIR_V6, then the
+// FR-13 NDI input, and NDI output of the Resolume feeds (signal output). The runtime is loaded at run time (never linked or shipped): from $NDI_RUNTIME_DIR_V6, then the
 // system library path. Without it, NDI is simply unavailable.
 #include <cstddef> // the NDI headers use NULL without including it
 
@@ -13,6 +13,8 @@
 #include <thread>
 
 namespace sv::media {
+
+class MediaSource;
 
 // The loaded runtime, initialised on first call; null when absent. Thread-safe.
 const NDIlib_v6 *ndi_api();
@@ -30,6 +32,25 @@ class NdiReceiver {
     NdiReceiver &operator=(const NdiReceiver &) = delete;
 
   private:
+    std::atomic_bool stop_{false};
+    std::thread thread_;
+};
+
+// Sends whatever `set_source` points at as one NDI stream, from its own thread polling the source's latest-wins slot.
+// Without a runtime it does nothing.
+class NdiSender {
+  public:
+    explicit NdiSender(const QString &name);
+    ~NdiSender();
+    NdiSender(const NdiSender &) = delete;
+    NdiSender &operator=(const NdiSender &) = delete;
+    // Sources are pooled and outlive the sender; null pauses the stream.
+    void set_source(const MediaSource *source) { source_ = source; }
+    double fps() const { return fps_; }
+
+  private:
+    std::atomic<const MediaSource *> source_{nullptr};
+    std::atomic<double> fps_{0};
     std::atomic_bool stop_{false};
     std::thread thread_;
 };
