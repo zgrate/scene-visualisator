@@ -10,3 +10,5 @@ CMakeUserPresets.json
 aqtinstall.log
 __pycache__/
 *.received
+/.ai/
+!docs/images/*.png
