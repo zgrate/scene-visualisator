@@ -581,3 +581,11 @@ Hard rules:
 - **UI and MCP:** RecordCard has the LIVE/REC fader, `OUT ●` and the SOURCES rows (Live/Rec/Both, a second tap clears);
   every row not Live also shows its own fader (tap the % to drop it); the Project screen has SIGNAL OUTPUT; the title bar shows `OUT` or `OUT REC`. MCP `play` takes `scopes` (`{key: mode}` or `{key: {mode, fade}}`) and `fade`,
   `get_recording` returns `output`, and file-gated `set_output` writes the preferences.
+- **DDP out (per object):** a `pixelStrip` or `ledWall` with `ddp {enabled, target, port (4048), offset (bytes)}`
+  sends its pixels to that controller, independent of `outputEnabled`. `Session::update_ddp()` builds
+  `DdpTarget`s on every revision: DMX strips list `(universe, slot)` pairs in RGB(W) order (the controller applies its
+  own LED order, so Arena's `colorFormat` is undone), and walls and slice strips get bytes from `PixelOutput`, its own
+  thread with its own `CompositionBuilder` (shared with the viewport) and `render::sample_slice` (string walls column
+  by column), so they keep running while a screen pauses the viewport. The engine sends `make_ddp` packets of at most
+  1440 bytes at `rate_hz`, grouped per endpoint and sorted by offset, PUSH on the last. `outputStatus` adds
+  `ddpTargets`, `ddpRate` and `ddpError`; the Inspector has the DDP rows.

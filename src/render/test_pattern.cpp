@@ -2,6 +2,8 @@
 
 #include <QPainter>
 #include <algorithm>
+#include <cmath>
+#include <numbers>
 
 namespace sv::render {
 
@@ -141,6 +143,36 @@ QImage compose_feeds(const json &project, QImage composition, const std::map<std
         p.restore();
     }
     return composition;
+}
+
+std::vector<std::uint8_t> sample_slice(const QImage &composition, const json &project, const json &slice, int cols,
+                                       int rows, bool column_major) {
+    std::vector<std::uint8_t> out;
+    if (composition.isNull() || cols < 1 || rows < 1)
+        return out;
+    const json comp = project.value("composition", json::object());
+    const double cw = comp.value("width", 1920.0), ch = comp.value("height", 1080.0);
+    const double sx = composition.width() / cw, sy = composition.height() / ch; // the image is capped at 4096
+    const double w = slice.value("w", cw), h = slice.value("h", ch);
+    const double cx = slice.value("x", 0.0) + w / 2, cy = slice.value("y", 0.0) + h / 2;
+    const double a = slice.value("angle", 0.0) * std::numbers::pi / 180, ca = std::cos(a), sa = std::sin(a);
+    out.reserve(std::size_t(cols) * std::size_t(rows) * 3);
+    const auto take = [&](int i, int r) {
+        const double lx = ((i + 0.5) / cols - 0.5) * w, ly = ((r + 0.5) / rows - 0.5) * h;
+        const int x = std::clamp(int(std::floor((cx + lx * ca - ly * sa) * sx)), 0, composition.width() - 1);
+        const int y = std::clamp(int(std::floor((cy + lx * sa + ly * ca) * sy)), 0, composition.height() - 1);
+        const QRgb c = composition.pixel(x, y); // shortcut: QImage::pixel per LED, scan lines once walls are 4K
+        out.insert(out.end(), {std::uint8_t(qRed(c)), std::uint8_t(qGreen(c)), std::uint8_t(qBlue(c))});
+    };
+    if (column_major)
+        for (int i = 0; i < cols; ++i)
+            for (int r = 0; r < rows; ++r)
+                take(i, r);
+    else
+        for (int r = 0; r < rows; ++r)
+            for (int i = 0; i < cols; ++i)
+                take(i, r);
+    return out;
 }
 
 } // namespace sv::render

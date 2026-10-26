@@ -1,5 +1,5 @@
 qt_add_executable(SceneVisualiser WIN32 MACOSX_BUNDLE channel_grid.cpp channel_grid.h drawing_item.cpp drawing_item.h ai_access.cpp ai_access.h main.cpp session.cpp session.h universe_meter.cpp universe_meter.h
-    viewport_item.cpp viewport_item.h view_keys.cpp view_keys.h updater.cpp updater.h crash_reports.cpp crash_reports.h)
+    viewport_item.cpp viewport_item.h composition_builder.cpp composition_builder.h pixel_output.cpp pixel_output.h view_keys.cpp view_keys.h updater.cpp updater.h crash_reports.cpp crash_reports.h)
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 qt_add_qml_module(SceneVisualiser
     URI SceneVisualiser

@@ -523,3 +523,24 @@ TEST_CASE("A running hazer raises the scene haze above the venue minimum, never 
     fixtures["hazer"].attrs.haze = 0.1;
     CHECK(build_scene(project, fixtures, {}, 0).haze == Catch::Approx(0.2));
 }
+
+TEST_CASE("sample_slice takes LED centres from a scaled, rotated slice, row- or column-major") {
+    const sv::json project = {{"composition", {{"width", 100}, {"height", 100}}}};
+    QImage img(200, 200, QImage::Format_RGB32); // twice the composition, as when it is capped
+    for (int y = 0; y < img.height(); ++y)
+        for (int x = 0; x < img.width(); ++x)
+            img.setPixel(x, y, qRgb(x, y, 0));
+    const sv::json slice = {{"x", 30}, {"y", 40}, {"w", 40}, {"h", 20}};
+    auto px = sample_slice(img, project, slice, 4, 2);
+    REQUIRE(px.size() == 4 * 2 * 3);
+    CHECK((px[0] == 70 && px[1] == 90)); // LED (0,0) at composition (35, 45)
+    CHECK((px[3] == 90 && px[4] == 90)); // LED (1,0) at (45, 45)
+    CHECK((px[12] == 70 && px[13] == 110)); // second row starts at (35, 55)
+    px = sample_slice(img, project, slice, 4, 2, true);
+    CHECK((px[3] == 70 && px[4] == 110)); // column-major: LED (0,1) comes second
+    auto turned = slice;
+    turned["angle"] = 90;
+    px = sample_slice(img, project, turned, 4, 2);
+    CHECK((px[0] == 110 && px[1] == 70)); // (-15, -5) about (50, 50) turned 90° lands on (55, 35)
+    CHECK(sample_slice(QImage(), project, slice, 4, 2).empty());
+}

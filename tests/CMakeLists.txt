@@ -24,7 +24,8 @@ endif()
 # Session (the QML-facing edit API) built straight from the app sources, under an offscreen QGuiApplication.
 add_executable(sv_session_tests session_tests.cpp ${PROJECT_SOURCE_DIR}/src/app/session.cpp ${PROJECT_SOURCE_DIR}/src/app/session.h
     ${PROJECT_SOURCE_DIR}/src/app/updater.cpp ${PROJECT_SOURCE_DIR}/src/app/crash_reports.cpp
-    ${PROJECT_SOURCE_DIR}/src/app/ai_access.cpp ${PROJECT_SOURCE_DIR}/src/app/view_keys.cpp)
+    ${PROJECT_SOURCE_DIR}/src/app/ai_access.cpp ${PROJECT_SOURCE_DIR}/src/app/view_keys.cpp
+    ${PROJECT_SOURCE_DIR}/src/app/composition_builder.cpp ${PROJECT_SOURCE_DIR}/src/app/pixel_output.cpp)
 set_target_properties(sv_session_tests PROPERTIES AUTOMOC ON)
 target_include_directories(sv_session_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/app)
 file(GLOB sv_test_gdtf CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/resources/gdtf/*.gdtf)

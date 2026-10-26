@@ -140,6 +140,8 @@ Session::Session(QObject *parent) : QObject(parent) {
     status_timer_.setInterval(50);
     connect(&status_timer_, &QTimer::timeout, this, [this] {
         status_ = dmx_.status();
+        if (!pixel_targets_.empty())
+            push_pixel_inputs(); // feeds and playback fades change without a document edit
         Q_EMIT dmxChanged();
     });
     status_timer_.start();
@@ -152,6 +154,7 @@ Session::Session(QObject *parent) : QObject(parent) {
 
 Session::~Session() {
     stop_ai();       // before anything a tool could reach
+    pixel_output_.set({});
     stopRecording(); // finalises the files
     dmx_.stop();
     the_session = nullptr;
@@ -218,6 +221,7 @@ void Session::refresh() {
         push_programmer(); // patch or type edits move the held bytes
     playback_mix_dirty_ = true;
     resend_playback();
+    update_ddp();
     ++revision_;
     Q_EMIT changed();
 }
@@ -2420,12 +2424,69 @@ QVariantMap Session::output_status() const {
             {"rate", st.packets_per_s},
             {"universes", int(st.universes)},
             {"error", QString::fromStdString(st.error)},
+            {"ddpTargets", int(st.ddp_targets)},
+            {"ddpRate", st.ddp_packets_per_s},
+            {"ddpError", QString::fromStdString(st.ddp_error)},
             {"ndi", [this] {
                  QVariantList streams;
                  for (const auto &[uuid, sender] : ndi_out_)
                      streams.push_back(QVariantMap{{"name", sender.first}, {"fps", sender.second->fps()}});
                  return streams;
              }()}};
+}
+
+void Session::update_ddp() {
+    std::vector<sv::proto::DdpTarget> targets;
+    std::vector<PixelOutput::Target> pixels;
+    for (const json &o : document_.data().value("objects", json::array())) {
+        const std::string type = o.value("type", std::string());
+        const json ddp = o.value("ddp", json::object());
+        if ((type != "pixelStrip" && type != "ledWall") || !ddp.is_object() || !ddp.value("enabled", false) ||
+            ddp.value("target", std::string()).empty())
+            continue;
+        sv::proto::DdpTarget t{.key = o.value("uuid", std::string()),
+                               .ip = ddp.value("target", std::string()),
+                               .port = std::uint16_t(std::clamp(ddp.value("port", int(sv::proto::ddp_port)), 1, 65535)),
+                               .offset = std::uint32_t(std::max(0, ddp.value("offset", 0)))};
+        const json slice = o.value("slice", json::object());
+        if (type == "ledWall") {
+            const auto derived = sv::wall_derived(o);
+            const bool strings = o.contains("strings") && o.at("strings").is_array() && !o.at("strings").empty();
+            pixels.push_back({t.key, slice, strings ? int(o.at("strings").size()) : derived.pixels_x, derived.pixels_y,
+                              strings});
+        } else if (o.value("pixelSource", std::string("dmx")) == "slice") {
+            pixels.push_back({t.key, slice, std::max(1, o.value("pixels", 1)), std::max(1, o.value("rows", 1))});
+        } else if (o.value("patch", json()).is_object()) {
+            // DDP controllers take RGB(W) and apply their own LED order, so Arena's colour format is undone here.
+            std::string format = o.value("colorFormat", std::string("rgb"));
+            std::ranges::transform(format, format.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+            t.rgbw = format.find('w') != std::string::npos;
+            const std::string order = t.rgbw ? "rgbw" : "rgb";
+            const int n = std::max(0, o.value("pixels", 0)) * std::max(1, o.value("rows", 1));
+            for (int i = 0; i < n; ++i) {
+                const sv::DmxAddress at = sv::strip_pixel_address(o, i);
+                for (char c : order) {
+                    const auto k = format.find(c);
+                    const int slot = k == std::string::npos ? 0 : at.address + int(k);
+                    t.channels.emplace_back(std::uint16_t(at.universe), std::uint16_t(slot <= 512 ? slot : 0));
+                }
+            }
+        } else {
+            continue; // an unpatched DMX strip has nothing to send
+        }
+        targets.push_back(std::move(t));
+    }
+    if (targets != ddp_targets_)
+        dmx_.set_ddp(ddp_targets_ = std::move(targets));
+    if (pixels != pixel_targets_ || !pixels.empty()) {
+        pixel_targets_ = std::move(pixels);
+        push_pixel_inputs();
+    }
+}
+
+void Session::push_pixel_inputs() {
+    pixel_output_.set({snapshot_, composition_, feed_sources(), playback_feed_sources(), playback_opacity(),
+                       pixel_targets_, 44});
 }
 
 void Session::checkForUpdates() { sv::updater::check_now(); }

@@ -6,6 +6,7 @@
 #include "core/project_file.h"
 #include "media/media_source.h"
 #include "media/ndi.h"
+#include "pixel_output.h"
 #include "protocol/dmx_engine.h"
 #include "render/drawing_painter.h"
 #include "render/scene_builder.h"
@@ -107,6 +108,7 @@ class Session : public QObject {
     std::shared_ptr<const sv::render::MeshLibrary> meshes() const { return meshes_; }
     sv::render::DrawingSheet drawing_sheet(const QString &kind) const;
     sv::proto::DmxEngine &dmx() { return dmx_; }
+    const std::vector<sv::proto::DdpTarget> &ddp_targets() const { return ddp_targets_; }
     const QImage &composition() const { return composition_; }
     const sv::media::MediaSource &media() const { return media_; } // latest() is safe on the render thread
     QVariantMap media_status() const;
@@ -377,6 +379,8 @@ class Session : public QObject {
     void resend_playback(); // after a scope, fader or patch change
     void apply_output();    // the output* preferences to the engine and the NDI senders
     void update_ndi_out();  // one sender per fed output, sending the live feed or the take's video, whichever shows
+    void update_ddp();      // DDP targets from every strip and wall with ddp.enabled
+    void push_pixel_inputs(); // what the composition-fed DDP targets sample
 
     QString name_;
     std::filesystem::path path_;
@@ -406,6 +410,9 @@ class Session : public QObject {
     sv::media::MediaSource *pooled_source(); // sources are never destroyed: the render thread may still poll one
     std::map<std::string, sv::media::MediaSource *> playback_feeds_; // output uuid -> its recorded mp4
     std::map<std::string, std::pair<QString, std::unique_ptr<sv::media::NdiSender>>> ndi_out_; // uuid -> name, sender
+    std::vector<sv::proto::DdpTarget> ddp_targets_;
+    std::vector<PixelOutput::Target> pixel_targets_;
+    PixelOutput pixel_output_{dmx_, media_}; // after the sources it polls, so it stops first
     std::set<std::string> selection_;
     quint64 revision_ = 0;
     std::optional<std::pair<std::string, sv::json>> moving_;

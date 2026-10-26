@@ -67,8 +67,8 @@ struct DmxEngine::Impl {
     asio::io_context io;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> work;
     std::thread thread;
-    udp::socket artnet{io}, sacn{io}, out{io};
-    asio::steady_timer tick_timer{io}, stats_timer{io}, out_timer{io};
+    udp::socket artnet{io}, sacn{io}, out{io}, ddp_out{io};
+    asio::steady_timer tick_timer{io}, stats_timer{io}, out_timer{io}, ddp_timer{io};
     std::array<std::uint8_t, 1500> artnet_buf{}, sacn_buf{};
     udp::endpoint artnet_from, sacn_from;
     Clock::time_point last_artsync{};
@@ -92,6 +92,12 @@ struct DmxEngine::Impl {
     }();
     std::uint64_t out_packets = 0;
     std::set<std::uint16_t> out_universes;
+    std::vector<DdpTarget> ddp_targets;
+    std::uint8_t ddp_seq = 0;
+    std::uint64_t ddp_packets = 0;
+
+    std::mutex ddp_mutex;
+    std::map<std::string, std::vector<std::uint8_t>> ddp_pixels; // set_ddp_pixels, by target key
 
     mutable std::mutex bus_mutex; // guards the map, not the buffers
     std::map<std::uint16_t, std::unique_ptr<TripleBuffer<UniverseFrame>>> bus;
@@ -423,6 +429,102 @@ struct DmxEngine::Impl {
         });
     }
 
+    void apply_ddp(std::vector<DdpTarget> targets) {
+        std::error_code ec;
+        ddp_timer.cancel();
+        ddp_targets = std::move(targets);
+        std::string error;
+        if (ddp_targets.empty()) {
+            ddp_out.close(ec);
+        } else if (!ddp_out.is_open()) {
+            try {
+                ddp_out.open(udp::v4());
+                ddp_out.set_option(asio::socket_base::broadcast(true));
+                ddp_out.bind(udp::endpoint(asio::ip::make_address(config.bind_address), 0));
+            } catch (const std::system_error &e) {
+                ddp_out.close(ec);
+                error = e.what();
+            }
+        }
+        {
+            std::lock_guard lock(status_mutex);
+            out_status.ddp_targets = ddp_targets.size(), out_status.ddp_error = error;
+        }
+        {
+            std::lock_guard lock(ddp_mutex);
+            std::erase_if(ddp_pixels, [&](auto &kv) {
+                return std::ranges::find(ddp_targets, kv.first, &DdpTarget::key) == ddp_targets.end();
+            });
+        }
+        send_ddp();
+    }
+
+    // One frame to every target. Targets sharing a controller go out in offset order and only the controller's last
+    // packet carries PUSH, so its whole buffer shows at once.
+    void send_ddp() {
+        if (!ddp_out.is_open())
+            return;
+        struct Part {
+            std::uint32_t offset;
+            bool rgbw;
+            std::vector<std::uint8_t> bytes;
+        };
+        std::map<udp::endpoint, std::vector<Part>> frames;
+        std::string error;
+        for (const DdpTarget &t : ddp_targets) {
+            std::error_code ec;
+            const auto ip = asio::ip::make_address_v4(t.ip, ec);
+            if (ec) {
+                error = "Bad DDP target \"" + t.ip + "\"";
+                continue;
+            }
+            std::vector<std::uint8_t> bytes;
+            if (t.channels.empty()) {
+                std::lock_guard lock(ddp_mutex);
+                if (auto it = ddp_pixels.find(t.key); it != ddp_pixels.end())
+                    bytes = it->second;
+            } else {
+                bytes.reserve(t.channels.size());
+                for (auto [u, slot] : t.channels) {
+                    auto it = universes.find(u);
+                    bytes.push_back(slot >= 1 && slot <= 512 && it != universes.end() ? it->second.published[slot - 1]
+                                                                                      : 0);
+                }
+            }
+            if (!bytes.empty())
+                frames[udp::endpoint(ip, t.port)].push_back({t.offset, t.rgbw, std::move(bytes)});
+        }
+        ddp_seq = std::uint8_t(ddp_seq % 15 + 1); // 1..15, 0 means no sequence
+        for (auto &[to, parts] : frames) {
+            std::ranges::sort(parts, {}, &Part::offset);
+            for (std::size_t p = 0; p < parts.size(); ++p) {
+                const auto &[offset, rgbw, bytes] = parts[p];
+                for (std::size_t at = 0; at < bytes.size(); at += ddp_max_data) {
+                    const std::size_t n = std::min(ddp_max_data, bytes.size() - at);
+                    const bool push = p + 1 == parts.size() && at + n == bytes.size();
+                    std::error_code ec;
+                    ddp_out.send_to(asio::buffer(make_ddp(ddp_seq, std::uint32_t(offset + at),
+                                                          std::span(bytes).subspan(at, n), push, rgbw)),
+                                    to, 0, ec);
+                    if (ec)
+                        error = ec.message();
+                    else
+                        ++ddp_packets;
+                }
+            }
+        }
+        {
+            std::lock_guard lock(status_mutex);
+            out_status.ddp_error = error;
+        }
+        ddp_timer.expires_after(
+            std::chrono::microseconds(std::int64_t(1e6 / std::clamp(out_config.rate_hz, 1.0, 100.0))));
+        ddp_timer.async_wait([this](std::error_code e) {
+            if (!e)
+                send_ddp();
+        });
+    }
+
     void run_stats() {
         stats_timer.expires_after(std::chrono::seconds(1));
         stats_timer.async_wait([this](std::error_code ec) {
@@ -445,8 +547,9 @@ struct DmxEngine::Impl {
             {
                 std::lock_guard lock(status_mutex);
                 out_status.packets_per_s = double(out_packets), out_status.universes = out_universes.size();
+                out_status.ddp_packets_per_s = double(ddp_packets);
             }
-            out_packets = 0, out_universes.clear();
+            out_packets = 0, out_universes.clear(), ddp_packets = 0;
             run_stats();
         });
     }
@@ -504,6 +607,8 @@ void DmxEngine::start() {
     m.run_stats();
     if (m.out_config.enabled) // reopened after a stop()
         asio::post(m.io, [&m] { m.apply_output(m.out_config); });
+    if (!m.ddp_targets.empty())
+        asio::post(m.io, [&m] { m.apply_ddp(m.ddp_targets); });
     m.io.restart();
     m.work.emplace(m.io.get_executor());
     m.thread = std::thread([&m] { m.io.run(); });
@@ -520,6 +625,8 @@ void DmxEngine::stop() {
     m.artnet.close(ec);
     m.sacn.close(ec);
     m.out.close(ec);
+    m.ddp_out.close(ec);
+    m.ddp_timer.cancel();
     m.tick_timer.cancel();
     m.stats_timer.cancel();
     m.out_timer.cancel();
@@ -594,6 +701,15 @@ void DmxEngine::set_playback(std::uint16_t universe, std::optional<PlaybackMix> 
 
 void DmxEngine::set_output(OutputConfig config) {
     asio::post(impl_->io, [&m = *impl_, config = std::move(config)]() mutable { m.apply_output(std::move(config)); });
+}
+
+void DmxEngine::set_ddp(std::vector<DdpTarget> targets) {
+    asio::post(impl_->io, [&m = *impl_, targets = std::move(targets)]() mutable { m.apply_ddp(std::move(targets)); });
+}
+
+void DmxEngine::set_ddp_pixels(const std::string &key, std::vector<std::uint8_t> pixels) {
+    std::lock_guard lock(impl_->ddp_mutex);
+    impl_->ddp_pixels[key] = std::move(pixels);
 }
 
 std::uint64_t DmxEngine::publish_serial() const { return impl_->published; }

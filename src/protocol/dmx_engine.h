@@ -39,6 +39,23 @@ struct OutputStatus {
     double packets_per_s = 0;
     std::size_t universes = 0; // sent in the last second
     std::string error;
+    std::size_t ddp_targets = 0;
+    double ddp_packets_per_s = 0;
+    std::string ddp_error;
+};
+
+// DDP pixel output (WLED, ESPixelStick, Falcon): one object's pixels as one byte stream at `offset` into a
+// controller's buffer, sent at the output rate whether or not universe output is on.
+struct DdpTarget {
+    std::string key; // object uuid
+    std::string ip;  // IPv4
+    std::uint16_t port = ddp_port;
+    std::uint32_t offset = 0; // bytes
+    bool rgbw = false;
+    // Bytes taken from the published universes as (universe, 1-based slot); slot 0 sends 0. Empty: the bytes come
+    // from set_ddp_pixels (composition-fed walls and strips).
+    std::vector<std::pair<std::uint16_t, std::uint16_t>> channels;
+    bool operator==(const DdpTarget &) const = default;
 };
 
 struct UniverseFrame {
@@ -92,6 +109,8 @@ class DmxEngine {
     // Sends every published universe out; packets from our own output socket are never ingested.
     void set_output(OutputConfig config);
     OutputStatus output_status() const;
+    void set_ddp(std::vector<DdpTarget> targets);
+    void set_ddp_pixels(const std::string &key, std::vector<std::uint8_t> pixels); // any thread, latest wins
 
     Timecode timecode() const; // any thread
     std::uint64_t publish_serial() const; // any thread; advances with every universe the merge publishes

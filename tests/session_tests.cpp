@@ -18,6 +18,8 @@
 #include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
+#include <QNetworkDatagram>
+#include <QUdpSocket>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -1650,4 +1652,69 @@ TEST_CASE("FR-5 view keys: numpad, emulation, presets and the card") {
                 groups << r.toMap()["group"].toString();
         CHECK(groups == QStringList{"Camera", "View", "Fly", "Edit", "Modal"});
     }
+}
+
+TEST_CASE("Session builds DDP targets: DMX strips in RGB order, walls and slice strips from the composition") {
+    Session s(nullptr);
+    json p = sv::new_project();
+    json strip = sv::new_pixel_strip("Strip", 2);
+    strip["colorFormat"] = "GRB";
+    strip["patch"] = {{"universe", 1}, {"address", 10}};
+    strip["ddp"] = {{"enabled", true}, {"target", "10.0.0.5"}, {"port", 4048}, {"offset", 6}};
+    json off = sv::new_pixel_strip("Off", 2);
+    off["patch"] = {{"universe", 1}, {"address", 100}};
+    off["ddp"] = {{"enabled", false}, {"target", "10.0.0.5"}};
+    json wall = sv::new_led_wall("Wall");
+    wall["ddp"] = {{"enabled", true}, {"target", "10.0.0.6"}};
+    p["objects"] = json::array({strip, off, wall});
+    s.set_project(p);
+
+    const auto &targets = s.ddp_targets();
+    REQUIRE(targets.size() == 2);
+    CHECK(targets[0].ip == "10.0.0.5");
+    CHECK(targets[0].offset == 6);
+    CHECK_FALSE(targets[0].rgbw);
+    using Slot = std::pair<std::uint16_t, std::uint16_t>;
+    CHECK(targets[0].channels == std::vector<Slot>{{1, 11}, {1, 10}, {1, 12}, {1, 14}, {1, 13}, {1, 15}});
+    CHECK(targets[1].ip == "10.0.0.6");
+    CHECK(targets[1].port == sv::proto::ddp_port);
+    CHECK(targets[1].channels.empty()); // pixels come from the composition
+
+    s.edit(QString::fromStdString(strip["uuid"]), "/ddp/enabled", false);
+    CHECK(s.ddp_targets().size() == 1);
+}
+
+TEST_CASE("Session sends a DDP wall's composition pixels from its own thread, whole frames ending in PUSH") {
+    Session s(nullptr);
+    QUdpSocket rx;
+    REQUIRE(rx.bind(QHostAddress::LocalHost, 0));
+    s.start_dmx();
+    json p = sv::new_project();
+    json wall = sv::new_led_wall("Wall");
+    wall["pixelPitch"] = 50.0; // 80 x 50 pixels: a default wall is 2 MB a frame, more than loopback keeps up with
+    wall["ddp"] = {{"enabled", true}, {"target", "127.0.0.1"}, {"port", rx.localPort()}};
+    p["objects"] = json::array({wall});
+    s.set_project(p);
+    const auto derived = sv::wall_derived(wall);
+    const std::size_t frame = std::size_t(derived.pixels_x) * std::size_t(derived.pixels_y) * 3;
+
+    std::size_t bytes = 0, pushes = 0, lit = 0;
+    QElapsedTimer clock;
+    clock.start();
+    while (pushes < 2 && clock.elapsed() < 3000) {
+        if (!rx.waitForReadyRead(100))
+            continue;
+        while (rx.hasPendingDatagrams()) {
+            const QByteArray d = rx.receiveDatagram().data();
+            REQUIRE(d.size() >= 10);
+            if (pushes == 1) { // count the second whole frame only
+                bytes += std::size_t(d.size() - 10);
+                lit += std::size_t(std::ranges::count_if(d.mid(10), [](char c) { return c != 0; }));
+            }
+            pushes += d[0] & 1;
+        }
+    }
+    CHECK(pushes == 2);
+    CHECK(bytes == frame);
+    CHECK(lit > 0); // the test pattern, not a black frame
 }

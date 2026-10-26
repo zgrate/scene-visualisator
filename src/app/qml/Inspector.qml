@@ -326,6 +326,52 @@ Column {
             }
         }
 
+        // DDP pixel output (WLED, Falcon, ESPixelStick): this object's pixels to one controller from a byte offset
+        Column {
+            id: ddpRows
+            visible: insp.o.type === "ledWall" || insp.o.type === "pixelStrip"
+            width: parent.width
+            spacing: 4
+            readonly property var ddp: insp.o.ddp || ({})
+            function set(key, value) {
+                const d = Object.assign({ enabled: false, target: "", port: 4048, offset: 0 }, ddp)
+                d[key] = value
+                Session.edit(insp.uuid, "/ddp", d)
+            }
+            Check {
+                text: qsTr("DDP output")
+                checked: ddpRows.ddp.enabled === true
+                onToggled: ddpRows.set("enabled", checked)
+            }
+            Field {
+                visible: ddpRows.ddp.enabled === true
+                label: qsTr("DDP IP")
+                numeric: false
+                warn: !(ddpRows.ddp.target || "")
+                values: [ddpRows.ddp.target || ""]
+                onCommitted: (i, t) => ddpRows.set("target", t.trim())
+            }
+            Field {
+                visible: ddpRows.ddp.enabled === true
+                label: qsTr("Port · offset")
+                values: [insp.fmt(ddpRows.ddp.port ?? 4048), insp.fmt(ddpRows.ddp.offset ?? 0)]
+                // offset is in bytes into the controller's buffer, so 3 per RGB pixel
+                onCommitted: (i, t) => {
+                    const v = Number(t)
+                    Number.isInteger(v) && v >= (i ? 0 : 1) && v <= (i ? 16777215 : 65535)
+                        ? ddpRows.set(i ? "offset" : "port", v) : Session.changed()
+                }
+            }
+            Label {
+                visible: ddpRows.ddp.enabled === true
+                x: 66
+                text: Session.outputStatus.ddpError || qsTr("%1 packets/s to %2 targets")
+                          .arg(Math.round(Session.outputStatus.ddpRate || 0)).arg(Session.outputStatus.ddpTargets || 0)
+                color: Session.outputStatus.ddpError ? Theme.err : Theme.muted
+                font.pixelSize: Theme.small
+            }
+        }
+
         ResolumeParams {
             visible: insp.o.type === "ledWall" || insp.o.type === "pixelStrip"
             uuid: insp.uuid

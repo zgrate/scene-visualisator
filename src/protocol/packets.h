@@ -1,5 +1,5 @@
 #pragma once
-// Art-Net 4 and sACN (E1.31-2018) packet parsing and building. Parsers validate everything: input is untrusted.
+// Art-Net 4, sACN (E1.31-2018) and DDP packet parsing and building. Parsers validate everything: input is untrusted.
 #include "protocol/constants.h"
 
 #include <span>
@@ -62,5 +62,8 @@ Bytes make_sacn_data(const Cid &cid, std::string_view source_name, std::uint8_t 
                      std::uint16_t universe, std::span<const std::uint8_t> slots, std::uint8_t start_code = 0,
                      std::uint16_t sync_address = 0, bool terminated = false);
 Bytes make_sacn_sync(const Cid &cid, std::uint8_t sequence, std::uint16_t sync_address);
+// One DDP (3waylabs Distributed Display Protocol) packet: up to ddp_max_data bytes at a byte offset into the
+// controller's pixel buffer. sequence 1..15 (0 = none); push on the last packet of a frame makes it show.
+Bytes make_ddp(std::uint8_t sequence, std::uint32_t offset, std::span<const std::uint8_t> data, bool push, bool rgbw);
 
 } // namespace sv::proto

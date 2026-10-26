@@ -448,3 +448,63 @@ TEST_CASE("DmxEngine programmer overrides only its masked slots, over live input
     CHECK(engine.status()[0].sources.size() == 1);
     engine.set_tap({});
 }
+
+TEST_CASE("make_ddp writes a DDP v1 header: flags, sequence, type, offset and length") {
+    const auto b = make_ddp(3, 0x01020304, frame_of(6, 9), true, false);
+    REQUIRE(b.size() == 16);
+    CHECK(b[0] == 0x41); // version 1, push
+    CHECK(b[1] == 3);
+    CHECK(b[2] == 0x0B); // RGB, 8 bits
+    CHECK(b[3] == 1);
+    CHECK(std::vector(b.begin() + 4, b.begin() + 8) == std::vector<std::uint8_t>{1, 2, 3, 4});
+    CHECK(b[8] == 0);
+    CHECK(b[9] == 6);
+    CHECK(b[10] == 9);
+    CHECK(make_ddp(0, 0, frame_of(2000, 1), false, true)[2] == 0x1B); // RGBW
+    CHECK(make_ddp(0, 0, frame_of(2000, 1), false, true).size() == 10 + ddp_max_data);
+}
+
+TEST_CASE("DmxEngine DDP output: universe bytes and set pixels, split at 1440, one PUSH per controller") {
+    DmxEngine engine({.artnet = false, .sacn = false, .bind_address = "127.0.0.1"});
+    engine.start();
+    engine.subscribe({1});
+    asio::io_context io;
+    asio::ip::udp::socket rx{io, asio::ip::udp::endpoint(asio::ip::make_address("127.0.0.1"), 0)};
+    rx.non_blocking(true);
+    const auto port = rx.local_endpoint().port();
+    engine.set_internal_frame(1, Slots{77});
+    engine.set_ddp_pixels("wall", frame_of(2000, 5));
+    engine.set_ddp({{.key = "strip", .ip = "127.0.0.1", .port = port, .channels = {{1, 1}, {1, 0}}},
+                    {.key = "wall", .ip = "127.0.0.1", .port = port, .offset = 2}});
+    struct Got {
+        bool push;
+        std::uint32_t offset;
+        std::size_t length;
+        std::uint8_t first;
+    };
+    std::vector<Got> got;
+    std::array<std::uint8_t, 1600> buf;
+    REQUIRE(eventually([&] {
+        std::error_code ec;
+        while (std::size_t n = rx.receive(asio::buffer(buf), 0, ec)) {
+            if (ec || n < 10)
+                break;
+            got.push_back({(buf[0] & 1) != 0,
+                           std::uint32_t(buf[4] << 24 | buf[5] << 16 | buf[6] << 8 | buf[7]),
+                           std::size_t(buf[8] << 8 | buf[9]), buf[10]});
+        }
+        return std::ranges::count(got, true, &Got::push) >= 2; // a whole frame after the first PUSH
+    }));
+    auto start = std::ranges::find(got, true, &Got::push) + 1;
+    REQUIRE(got.end() - start >= 3);
+    CHECK((!start[0].push && start[0].offset == 0 && start[0].length == 2 && start[0].first == 77));
+    CHECK((!start[1].push && start[1].offset == 2 && start[1].length == 1440 && start[1].first == 5));
+    CHECK((start[2].push && start[2].offset == 1442 && start[2].length == 560));
+    CHECK(eventually([&] { return engine.output_status().ddp_packets_per_s > 0; }));
+    CHECK(engine.output_status().ddp_targets == 2);
+
+    engine.set_ddp({{.key = "bad", .ip = "not an ip", .port = port, .channels = {{1, 1}}}});
+    CHECK(eventually([&] { return !engine.output_status().ddp_error.empty(); }));
+    engine.set_ddp({});
+    CHECK(eventually([&] { return engine.output_status().ddp_targets == 0; }));
+}

@@ -104,6 +104,19 @@ Bytes make_artdmx(std::uint16_t port_address, std::uint8_t sequence, std::span<c
     return b;
 }
 
+Bytes make_ddp(std::uint8_t sequence, std::uint32_t offset, std::span<const std::uint8_t> data, bool push, bool rgbw) {
+    const std::size_t n = std::min(data.size(), ddp_max_data);
+    Bytes b(10 + n);
+    b[0] = std::uint8_t(0x40 | (push ? 0x01 : 0)); // version 1
+    b[1] = std::uint8_t(sequence & 0x0F);
+    b[2] = rgbw ? 0x1B : 0x0B; // RGB 8 bit per channel (bits 3-5: 001 RGB, 011 RGBW)
+    b[3] = 1;                  // default output device
+    put32(b, 4, offset);
+    put16(b, 8, std::uint16_t(n));
+    std::copy_n(data.begin(), n, b.begin() + 10);
+    return b;
+}
+
 Bytes make_artsync() {
     Bytes b = artnet_header(14, op_sync);
     b[11] = 14;

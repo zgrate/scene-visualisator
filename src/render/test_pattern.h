@@ -6,6 +6,7 @@
 
 #include <QImage>
 #include <map>
+#include <vector>
 
 namespace sv::render {
 
@@ -15,5 +16,11 @@ QImage make_composition(const json &project, const QImage &still = {}); // RGBA8
 // that output's frame painted onto its slice of the composition. Output uuid -> latest frame.
 QImage compose_feeds(const json &project, QImage composition, const std::map<std::string, QImage> &feeds,
                      const std::map<std::string, double> &opacity = {}); // per output, 1 if missing
+
+// LED colours of a slice for DDP output, as RGB bytes: cols x rows pixel centres turned by slice.angle about the
+// slice centre (as the wall shader does), nearest composition pixel. Row by row from the top left, or column by
+// column for LED strings.
+std::vector<std::uint8_t> sample_slice(const QImage &composition, const json &project, const json &slice, int cols,
+                                       int rows, bool column_major = false);
 
 } // namespace sv::render

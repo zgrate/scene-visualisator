@@ -1,5 +1,6 @@
 #include "viewport_item.h"
 
+#include "composition_builder.h"
 #include "render/scene_renderer.h"
 #include "render/test_pattern.h"
 #include "session.h"
@@ -35,73 +36,23 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
             selection = s->selection();
             if (!gizmo.empty())
                 selection.insert(gizmo);
-            cpu_composition = s->composition();
-            scene.set_composition(cpu_composition);
-            composition_size = cpu_composition.size();
-            base = {};
-            media_serial = 0; // a live source's current frame goes back over the redrawn composition
-            for (auto &[uuid, feed] : feeds)
-                feed.serial = 0;
+            if (composition.set_project(project, s->composition()))
+                scene.set_composition(composition.cpu());
             buffers.clear();
             for (const QVariant &u : s->universes()) // every universe a fixture or strip reads
                 buffers.try_emplace(std::uint16_t(u.toInt()), s->dmx().frames(std::uint16_t(u.toInt())));
         }
-        if (auto sources = s->feed_sources();
-            sources.size() != feeds.size() || !std::ranges::equal(sources, feeds, [](const auto &a, const auto &b) {
-                return a.first == b.first && a.second == b.second.source;
-            })) {
-            feeds.clear();
-            for (const auto &[uuid, source] : sources)
-                feeds[uuid] = {source};
-            base = {};
-            media_serial = 0;
-            scene.set_composition(cpu_composition);
-        }
-        if (auto sources = s->playback_feed_sources();
-            sources.size() != recorded.size() ||
-            !std::ranges::equal(sources, recorded, [](const auto &a, const auto &b) {
-                return a.first == b.first && a.second == b.second.source;
-            })) {
-            recorded.clear();
-            for (const auto &[uuid, source] : sources)
-                recorded[uuid] = {source};
-            base = {};
-            media_serial = 0;
-            scene.set_composition(cpu_composition);
-        }
-        if (auto opacity = s->playback_opacity(); opacity != recorded_opacity)
-            recorded_opacity = std::move(opacity), opacity_changed = true;
+        if (composition.set_feeds(s->feed_sources()))
+            scene.set_composition(composition.cpu());
+        if (composition.set_recorded(s->playback_feed_sources()))
+            scene.set_composition(composition.cpu());
+        composition.set_opacity(s->playback_opacity());
         time = double(view->clock.elapsed()) / 1000;
     }
 
     void render(QRhiCommandBuffer *cb) override {
-        bool fresh = false;
-        if (QImage frame = Session::instance()->media().latest(media_serial); !frame.isNull()) {
-            // Placed by source.fit unless it already matches the composition. shortcut: a CPU blit per frame;
-            // scale in the wall shader when 4K sources make it show up in profiles (NFR-2).
-            base = project && frame.size() != composition_size ? sv::render::make_composition(*project, frame)
-                                                               : std::move(frame);
-            fresh = true;
-        }
-        std::map<std::string, QImage> frames;
-        for (auto &[uuid, feed] : feeds) {
-            if (QImage frame = feed.source->latest(feed.serial); !frame.isNull())
-                feed.frame = std::move(frame), fresh = true;
-            if (!feed.frame.isNull())
-                frames[uuid] = feed.frame;
-        }
-        std::map<std::string, QImage> recorded_frames;
-        for (auto &[uuid, feed] : recorded) {
-            if (QImage frame = feed.source->latest(feed.serial); !frame.isNull())
-                feed.frame = std::move(frame), fresh = true;
-            if (!feed.frame.isNull())
-                recorded_frames[uuid] = feed.frame;
-        }
-        fresh = std::exchange(opacity_changed, false) || fresh;
-        if (fresh && project)
-            scene.set_composition(sv::render::compose_feeds(
-                *project, sv::render::compose_feeds(*project, base.isNull() ? cpu_composition : base, frames),
-                recorded_frames, recorded_opacity));
+        if (QImage c = composition.update(Session::instance()->media()); !c.isNull())
+            scene.set_composition(std::move(c));
         const auto started = std::chrono::steady_clock::now();
         if (project) {
             for (auto &[u, b] : buffers)
@@ -154,19 +105,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
     sv::render::SceneRenderer scene;
     ViewportItem *view = nullptr; // outlives its renderer
     quint64 revision = ~0ull;
-    quint64 media_serial = 0;
-    struct Feed {
-        const sv::media::MediaSource *source = nullptr;
-        quint64 serial = 0;
-        QImage frame; // kept, so a quiet feed stays on its walls while another one updates
-    };
-    std::map<std::string, Feed> feeds;    // output uuid -> its live feed
-    std::map<std::string, Feed> recorded; // output uuid -> the take's video, drawn over the live feed
-    std::map<std::string, double> recorded_opacity;
-    bool opacity_changed = false;
-    QImage cpu_composition; // Session::composition() as of the last synchronize
-    QImage base;            // the composition under the feeds: the main source's frame or the CPU one
-    QSize composition_size;
+    CompositionBuilder composition;
     std::shared_ptr<const sv::json> project;
     std::shared_ptr<const sv::render::FixtureLibrary> library;
     std::shared_ptr<const sv::render::MeshLibrary> meshes;

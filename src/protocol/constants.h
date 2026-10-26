@@ -10,6 +10,8 @@ using Slots = std::array<std::uint8_t, 512>;
 
 inline constexpr std::uint16_t artnet_port = 6454;
 inline constexpr std::uint16_t sacn_port = 5568;
+inline constexpr std::uint16_t ddp_port = 4048;
+inline constexpr std::size_t ddp_max_data = 1440; // bytes per DDP packet, 480 RGB pixels
 inline constexpr auto artnet_timeout = std::chrono::milliseconds(3000);
 inline constexpr auto sacn_timeout = std::chrono::milliseconds(2500);
 inline constexpr auto artsync_timeout = std::chrono::milliseconds(4000); // Art-Net 4: sync mode ends after 4 s
