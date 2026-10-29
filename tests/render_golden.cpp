@@ -1,5 +1,6 @@
 // Headless render smoke test (M4): the demo rig with a generator frame, rendered through QRhi into a PNG and
-// compared against tests/golden/demo.png. Usage: sv_render_golden <golden.png> [--no-compare]
+// compared against tests/golden/demo.png. Usage: sv_render_golden <golden.png> [--no-compare] [--cinematic]
+// --cinematic draws the offline render's look (demo-cinematic.png).
 // SV_UPDATE_GOLDEN=1 (or a missing golden) rewrites the golden instead.
 #include "render/scene_builder.h"
 #include "render/scene_renderer.h"
@@ -18,7 +19,7 @@ using namespace sv::render;
 
 namespace {
 
-QImage render_demo(QRhi *rhi, QSize size) {
+QImage render_demo(QRhi *rhi, QSize size, bool cinematic) {
     std::unique_ptr<QRhiTexture> colour(
         rhi->newTexture(QRhiTexture::RGBA8, size, 1, QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
     colour->create();
@@ -43,6 +44,7 @@ QImage render_demo(QRhi *rhi, QSize size) {
     });
 
     SceneRenderer renderer;
+    renderer.cinematic = cinematic;
     renderer.set_scene(build_scene(project, fixtures, {}, 0));
     renderer.set_composition(make_composition(project));
     renderer.set_camera(OrbitCamera{}, 0);
@@ -68,11 +70,12 @@ QImage render_demo(QRhi *rhi, QSize size) {
 int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
     if (argc < 2) {
-        std::fprintf(stderr, "usage: sv_render_golden <golden.png> [--no-compare]\n");
+        std::fprintf(stderr, "usage: sv_render_golden <golden.png> [--no-compare] [--cinematic]\n");
         return 2;
     }
     const QString golden = QString::fromLocal8Bit(argv[1]);
-    const bool compare = !(argc > 2 && QByteArray(argv[2]) == "--no-compare");
+    const QStringList flags = app.arguments().mid(2);
+    const bool compare = !flags.contains("--no-compare");
 
 #ifdef Q_OS_WIN
     // The app's backend (B1), on WARP: CI runners have no GPU and Windows' own OpenGL is 1.1.
@@ -93,7 +96,7 @@ int main(int argc, char *argv[]) {
         std::fprintf(stderr, "no QRhi, skipping\n");
         return 77; // ctest SKIP_RETURN_CODE
     }
-    const QImage actual = render_demo(rhi.get(), {640, 360});
+    const QImage actual = render_demo(rhi.get(), {640, 360}, flags.contains("--cinematic"));
     if (actual.isNull())
         return 2;
     actual.save("render_golden_actual.png");

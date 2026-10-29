@@ -26,7 +26,10 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
     void synchronize(QQuickRhiItem *item) override {
         view = static_cast<ViewportItem *>(item);
         Session *s = Session::instance();
-        scene.set_camera(view->camera, double(view->clock.elapsed()) / 1000);
+        scene.hdr = view->hdr();
+        record_view = s->view_recording();
+        time = double(view->clock.elapsed()) / 1000;
+        scene.set_camera(view->camera, time);
         if (const std::string g = view->gizmo_entry(); s->revision() != revision || g != gizmo) {
             gizmo = g;
             revision = s->revision();
@@ -47,7 +50,6 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
         if (composition.set_recorded(s->playback_feed_sources()))
             scene.set_composition(composition.cpu());
         composition.set_opacity(s->playback_opacity());
-        time = double(view->clock.elapsed()) / 1000;
     }
 
     void render(QRhiCommandBuffer *cb) override {
@@ -63,9 +65,8 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
                 return it == buffers.end() ? std::span<const std::uint8_t>()
                                            : std::span<const std::uint8_t>(it->second->front().data);
             });
-            view->animating = std::ranges::any_of(fixtures, [](const auto &f) {
-                return f.second.attrs.strobe_hz > 0 && f.second.attrs.dimmer > 0;
-            });
+            view->animating = std::ranges::any_of(
+                fixtures, [](const auto &f) { return f.second.attrs.strobe_hz > 0 && f.second.attrs.dimmer > 0; });
             auto built = sv::render::build_scene(*project, fixtures, selection, time, *meshes);
             std::set<int> lit;
             for (const auto &b : built.beams)
@@ -76,7 +77,34 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
         }
         cpu_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         scene.render(cb, renderTarget());
+        if (record_view)
+            read_back(cb);
         publish_stats();
+    }
+
+    // Copies the finished frame to the Session's view recorder (section 26). One readback in flight at a time; a
+    // frame that arrives meanwhile is not recorded, and the recorder's timestamps keep the video in real time.
+    void read_back(QRhiCommandBuffer *cb) {
+        if (readback_pending->exchange(true))
+            return;
+        auto *result = new QRhiReadbackResult;
+        result->completed = [result, pending = readback_pending, flip = rhi()->isYUpInFramebuffer()] {
+            const QSize px = result->pixelSize;
+            QImage image(reinterpret_cast<const uchar *>(result->data.constData()), px.width(), px.height(),
+                         QImage::Format_RGBA8888);
+            image = image.copy(0, 0, px.width() & ~1, px.height() & ~1); // a deep copy; H.264 needs even sizes
+            if (flip)
+                image.flip(Qt::Vertical);
+            *pending = false;
+            // Deleted on the UI thread, once QRhi is done calling this function.
+            QMetaObject::invokeMethod(Session::instance(), [result, image = std::move(image)] {
+                delete result;
+                Session::instance()->push_view_frame(image);
+            });
+        };
+        QRhiResourceUpdateBatch *u = rhi()->nextResourceUpdateBatch();
+        u->readBackTexture({colorTexture()}, result);
+        cb->resourceUpdate(u);
     }
 
     // Debug mode's HUD and get_render_stats: averages over about half a second, published like the meter.
@@ -94,6 +122,7 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
                                                    {"beams", counts[2]},
                                                    {"beamFixtures", counts[4]},
                                                    {"walls", counts[3]},
+                                                   {"hdr", scene.hdr_active()},
                                                    {"backend", QString::fromLatin1(rhi()->backendName())},
                                                    {"device", QString::fromUtf8(info.deviceName)},
                                                    {"revision", revision}});
@@ -113,6 +142,8 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
     std::string gizmo;
     std::map<std::uint16_t, sv::proto::TripleBuffer<sv::proto::UniverseFrame> *> buffers;
     double time = 0;
+    bool record_view = false;
+    std::shared_ptr<std::atomic_bool> readback_pending = std::make_shared<std::atomic_bool>(false);
     QElapsedTimer stats_clock;
     int frames = 0;
     double cpu_ms = 0;
@@ -124,7 +155,11 @@ class ViewportRenderer : public QQuickRhiItemRenderer {
 ViewportItem::ViewportItem(QQuickItem *parent) : QQuickRhiItem(parent) {
     setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton | Qt::RightButton);
     setAcceptHoverEvents(true); // modal G/R/S follow the cursor without a button held
-    setSampleCount(4);
+    // High quality multisamples its own HDR target, so the item's texture needs no MSAA of its own.
+    const auto apply_quality = [this] { setSampleCount(hdr() ? 1 : 4); };
+    apply_quality();
+    if (Session *s = Session::instance())
+        connect(s, &Session::changed, this, apply_quality);
     clock.start();
     // Redraws when DMX, media, the document or a strobe changes; input handlers call update() themselves. Debug mode
     // always draws, so the HUD's frame rate means something.
@@ -140,7 +175,9 @@ ViewportItem::ViewportItem(QQuickItem *parent) : QQuickRhiItem(parent) {
             now.push_back(source->serial());
         for (const auto &[uuid, opacity] : s->playback_opacity())
             now.push_back(quint64(opacity * 1e6));
-        if (now != drawn_ || animating || s->debug_mode())
+        if (s->rendering()) // an offline render seeks the inputs frame by frame; the view would only flicker
+            return;
+        if (now != drawn_ || animating || s->debug_mode() || s->view_recording()) // a recording needs every frame
             drawn_ = std::move(now), update();
     });
     tick.start();
@@ -429,8 +466,8 @@ bool ViewportItem::event(QEvent *e) {
     }
     // Plain arrows, PgUp/PgDn and Home drive the camera here, not the window's shortcuts (Alt+arrows nudge).
     if (const auto *k = static_cast<QKeyEvent *>(e); e->type() == QEvent::ShortcutOverride && keys_ &&
-                                                      !(k->modifiers() & Qt::AltModifier) &&
-                                                      (k->key() >= Qt::Key_Home && k->key() <= Qt::Key_PageDown)) {
+                                                     !(k->modifiers() & Qt::AltModifier) &&
+                                                     (k->key() >= Qt::Key_Home && k->key() <= Qt::Key_PageDown)) {
         e->accept();
         return true;
     }
@@ -596,8 +633,8 @@ void ViewportItem::keyPressEvent(QKeyEvent *e) {
     }
     Session *s = Session::instance();
     const bool blender = Session::controls() != "maya";
-    const sv::app::ViewKey *key = sv::app::find_view_key(k, mods, e->modifiers() & Qt::KeypadModifier, blender,
-                                                         Session::emulate_numpad());
+    const sv::app::ViewKey *key =
+        sv::app::find_view_key(k, mods, e->modifiers() & Qt::KeypadModifier, blender, Session::emulate_numpad());
     if (!key) {
         e->ignore();
         return;
@@ -691,9 +728,13 @@ QVariantList ViewportItem::keyHelp() const { return sv::app::view_key_help(Sessi
 
 void ViewportItem::setPreset(const QString &name) {
     using P = sv::render::OrbitCamera::Preset;
-    static const std::map<QString, P> presets{
-        {"Perspective", P::perspective}, {"Top", P::top}, {"Front", P::front}, {"Side", P::side},
-        {"Back", P::back},           {"Other side", P::left}, {"Bottom", P::bottom}};
+    static const std::map<QString, P> presets{{"Perspective", P::perspective},
+                                              {"Top", P::top},
+                                              {"Front", P::front},
+                                              {"Side", P::side},
+                                              {"Back", P::back},
+                                              {"Other side", P::left},
+                                              {"Bottom", P::bottom}};
     if (const auto it = presets.find(name); it != presets.end()) {
         camera.set_preset(it->second);
         view_ = name;
@@ -732,3 +773,5 @@ void ViewportItem::wheelEvent(QWheelEvent *e) {
     camera.zoom(float(e->angleDelta().y()) / 120);
     update();
 }
+
+bool ViewportItem::hdr() { return Session::preference("renderQuality", "high").toString() != "fast"; }

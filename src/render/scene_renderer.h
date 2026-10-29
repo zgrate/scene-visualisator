@@ -1,6 +1,8 @@
 #pragma once
 // QRhi renderer for a RenderScene: floor grid, instanced boxes, LED walls fed by the composition texture,
-// and additive volumetric beam cones. Owned and driven by the render thread.
+// and additive volumetric beam cones. Owned and driven by the render thread. With `hdr` the scene renders into a
+// 16-bit float target, then bloom and a highlight roll-off composite it into the caller's target. `cinematic` adds
+// rig lighting for the offline render.
 #include "render/camera.h"
 #include "render/scene_builder.h"
 
@@ -27,6 +29,11 @@ class SceneRenderer {
     void render(QRhiCommandBuffer *cb, QRhiRenderTarget *rt);
 
     QColor clear_color{0x0b, 0x0c, 0x10}; // Theme viewport token
+    bool hdr = true;                      // preference renderQuality: high (true) or fast
+    // Offline render only (implies hdr): beams and LED walls light the rig, the floor reflects the walls, beams are
+    // ray-marched, and a filmic tone map replaces the Theme-exact roll-off. Set before the first initialize().
+    bool cinematic = false;
+    bool hdr_active() const; // hdr, and the backend can render RGBA16F
 
   private:
     struct Gpu;

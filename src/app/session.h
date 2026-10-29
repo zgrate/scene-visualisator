@@ -6,6 +6,7 @@
 #include "core/project_file.h"
 #include "media/media_source.h"
 #include "media/ndi.h"
+#include "offline_render.h"
 #include "pixel_output.h"
 #include "protocol/dmx_engine.h"
 #include "render/drawing_painter.h"
@@ -81,6 +82,7 @@ class Session : public QObject {
     // Show recording and playback: {active, playing, paused, path, t, duration, replace, hasVideo, lossless, error,
     // fade, scopes {key: live|recording|both}}.
     Q_PROPERTY(QVariantMap recording READ recording NOTIFY dmxChanged)
+    Q_PROPERTY(QString generator READ generator NOTIFY changed) // the internal test pattern: off, full, ... mapping
     // Signal output (preferences output*): {enabled, protocol, target, offset, rate, universes, error, ndi [{name}]}.
     Q_PROPERTY(QVariantMap outputStatus READ output_status NOTIFY dmxChanged)
     // Light control: attributes held per fixture {uuid: {attr: value}}, target groups {key, name, kind, uuids}
@@ -93,7 +95,10 @@ class Session : public QObject {
   public:
     explicit Session(QObject *parent); // no default: QML would construct its own instead of calling create()
     ~Session() override;
-    static Session *instance(); // the one created in main()
+    static Session *instance();                                     // the one created in main()
+    bool view_recording() const { return view_recorder_.active(); } // the viewport reads its frames back
+    bool rendering() const { return render_.active(); }             // the viewport rests meanwhile
+    void push_view_frame(const QImage &frame) { view_recorder_.push(frame); }
     static QString controls() { return preference("controls", "blender").toString(); }
     static bool emulate_numpad() { return preference("emulateNumpad", false).toBool(); } // top-row digits, - and =
     static Session *create(QQmlEngine *, QJSEngine *);
@@ -129,6 +134,7 @@ class Session : public QObject {
     void select(const std::optional<std::string> &uuid, bool add);
     void start_dmx(); // logs and carries on if a port is taken
     void set_generator(sv::proto::Pattern pattern);
+    void apply_generator_options(); // preferences generatorSmoothMs and generatorMax (Pattern::mapping)
     // Viewport drag: preview moves only the render snapshot; commit writes one undoable step.
     // FR-5 drag preview: fields (position, rotation, scale) replace the object's in the snapshot only; commit writes
     // them as one undo step.
@@ -261,16 +267,28 @@ class Session : public QObject {
 
     // Show recording (<base>.svdmx with the merged DMX, <base>.mp4 with the composition when a live media source
     // runs). All return the error, empty on success.
-    QVariantMap recording() const;
-    Q_INVOKABLE QString startRecording(const QUrl &url, bool lossless);
+    QVariantMap recording() const; // one map per dmxChanged() emit: QML reads it once per binding
+    QString generator() const;
+    Q_INVOKABLE void setGenerator(const QString &name); // a name from sv::proto::pattern_names; others are ignored
+    // view: also write what the 3D viewport shows to <base>.view.mp4 (frames come from ViewportItem).
+    Q_INVOKABLE QString startRecording(const QUrl &url, bool lossless, bool view = false);
     Q_INVOKABLE void stopRecording();
+    // Offline render of the loaded take, else the composition video, frame by frame to an mp4 (see OfflineRender):
+    // {path, fps (30), start (ms), duration (ms; the take's or the video's length), width, height (1920x1080),
+    // lossless, camera [{t, target, yaw, pitch, distance, fov}]}. Progress is recording.render.
+    Q_INVOKABLE QString startRender(const QVariantMap &options);
+    Q_INVOKABLE void stopRender();
+    const QImage &renderPreview() const { return render_.preview(); } // image://render/<previewSerial>
+    // Qt's FFmpeg plugin names the H.264 encoder it opens at debug level; recording.render.encoder reads it.
+    static constexpr const char *encoder_log_rule = "qt.multimedia.ffmpeg.videoencoder.debug=true";
     // Plays <base>.svdmx and <base>.mp4 beside it, looping. replace overrides live DMX, otherwise it merges.
     Q_INVOKABLE QString startPlayback(const QUrl &url);
     Q_INVOKABLE void stopPlayback();
     Q_INVOKABLE void pausePlayback(bool paused);
     Q_INVOKABLE void seekPlayback(double ms);
     // Chase Art-Net timecode: the take's time is the timecode minus `offset` (HH:MM:SS:FF or HH:MM:SS), held while
-    // no timecode arrives, and it never loops. An empty offset keeps the last one. Returns the error for an unreadable offset.
+    // no timecode arrives, and it never loops. An empty offset keeps the last one. Returns the error for an unreadable
+    // offset.
     Q_INVOKABLE QString setPlaybackChase(bool on, const QString &offset);
     void chase_timecode(qint64 tc_ms); // one tick of the chase; -1 = no timecode (called from playback_tick)
     Q_INVOKABLE void setPlaybackReplace(bool replace); // the default scope: recording, or both (HTP)
@@ -296,7 +314,7 @@ class Session : public QObject {
     // channel for (the dimmer, shutter and strobe) stay fixture-wide.
     Q_INVOKABLE void setLight(const QStringList &uuids, const QVariantMap &attributes, int head = -1);
     Q_INVOKABLE void releaseLights(const QStringList &uuids);
-    Q_INVOKABLE QStringList controlAttributes(const QStringList &uuids) const;    // GDTF attributes their modes have
+    Q_INVOKABLE QStringList controlAttributes(const QStringList &uuids) const; // GDTF attributes their modes have
     Q_INVOKABLE int controlHeads(const QStringList &uuids) const; // fewest heads in the selection, 0 if none
     Q_INVOKABLE QString saveGroup(const QString &name, const QStringList &uuids); // project["groups"], one undo step
     Q_INVOKABLE void deleteGroup(const QString &uuid);
@@ -374,12 +392,13 @@ class Session : public QObject {
     void restart_ai(); // applies the AI preferences: stops, or (re)starts the listener
     void stop_ai();
     void playback_tick();
+    void playback_send(qint64 t); // the take's DMX at t to the engine
     qint64 playback_time() const; // ms into the recording
     void send_playback(std::uint16_t universe, const sv::proto::Slots &data);
-    void resend_playback(); // after a scope, fader or patch change
-    void apply_output();    // the output* preferences to the engine and the NDI senders
-    void update_ndi_out();  // one sender per fed output, sending the live feed or the take's video, whichever shows
-    void update_ddp();      // DDP targets from every strip and wall with ddp.enabled
+    void resend_playback();   // after a scope, fader or patch change
+    void apply_output();      // the output* preferences to the engine and the NDI senders
+    void update_ndi_out();    // one sender per fed output, sending the live feed or the take's video, whichever shows
+    void update_ddp();        // DDP targets from every strip and wall with ddp.enabled
     void push_pixel_inputs(); // what the composition-fed DDP targets sample
 
     QString name_;
@@ -412,12 +431,26 @@ class Session : public QObject {
     std::map<std::string, std::pair<QString, std::unique_ptr<sv::media::NdiSender>>> ndi_out_; // uuid -> name, sender
     std::vector<sv::proto::DdpTarget> ddp_targets_;
     std::vector<PixelOutput::Target> pixel_targets_;
+    std::vector<sv::json> mapping_probes_;   // Pattern::mapping only
     PixelOutput pixel_output_{dmx_, media_}; // after the sources it polls, so it stops first
     std::set<std::string> selection_;
     quint64 revision_ = 0;
     std::optional<std::pair<std::string, sv::json>> moving_;
     std::vector<sv::proto::UniverseStatus> status_;
     QTimer status_timer_;
+    void notify_dmx(); // Q_EMIT dmxChanged() with recording() served from one map for the whole emit
+    // The status maps behind dmxChanged(), built once per emit (true only inside notify_dmx) so the bindings that
+    // read them do not rebuild them — output_status alone reads six QSettings keys per call.
+    QVariantMap recording_now() const, dmx_status_now() const, media_status_now() const, output_status_now() const,
+        ai_status_now() const;
+    QVariantList feed_status_now() const;
+    bool status_cached_ = false;
+    struct {
+        QVariantMap recording, dmx, media, output, ai;
+        QVariantList feed;
+    } status_cache_;
+    int status_ticks_ = 0;
+    double ui_tick_ms_ = 0; // EMA of one dmxChanged() emit: the UI's binding work
 
     struct Recorder {
         std::mutex mutex; // the tap writes on the network thread, stopRecording closes on this one
@@ -427,6 +460,9 @@ class Session : public QObject {
     std::shared_ptr<Recorder> recorder_;
     QString record_path_, record_error_;
     bool record_video_ = false;
+    sv::media::FrameRecorder view_recorder_;
+    OfflineRender render_;
+    bool render_paused_before_ = false; // the take's pause state, restored after a render
     std::optional<sv::DmxRecording> playback_;
     QString playback_path_;
     QTimer playback_timer_;

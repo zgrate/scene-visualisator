@@ -10,11 +10,15 @@ target_compile_definitions(sv_render_golden PRIVATE SV_SOURCE_DIR="${PROJECT_SOU
 find_program(XVFB_RUN xvfb-run)
 if(UNIX AND NOT APPLE AND XVFB_RUN)
     add_test(NAME render_golden COMMAND ${XVFB_RUN} -a $<TARGET_FILE:sv_render_golden> ${PROJECT_SOURCE_DIR}/tests/golden/demo.png)
-    set_tests_properties(render_golden PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
+    add_test(NAME render_golden_cinematic COMMAND ${XVFB_RUN} -a $<TARGET_FILE:sv_render_golden>
+             ${PROJECT_SOURCE_DIR}/tests/golden/demo-cinematic.png --cinematic)
+    set_tests_properties(render_golden render_golden_cinematic PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
 else()
     add_test(NAME render_golden COMMAND sv_render_golden ${PROJECT_SOURCE_DIR}/tests/golden/demo.png --no-compare)
+    add_test(NAME render_golden_cinematic COMMAND sv_render_golden ${PROJECT_SOURCE_DIR}/tests/golden/demo-cinematic.png
+                                                  --no-compare --cinematic)
 endif()
-set_property(TEST render_golden PROPERTY SKIP_RETURN_CODE 77)
+set_tests_properties(render_golden render_golden_cinematic PROPERTIES SKIP_RETURN_CODE 77)
 # AI access end to end: the real app with --mcp, probed over HTTP (docs/mcp-plan.md C5).
 if(UNIX AND NOT APPLE AND XVFB_RUN AND TARGET SceneVisualiser)
     add_test(NAME mcp_e2e COMMAND ${PROJECT_SOURCE_DIR}/tools/mcp_e2e.sh $<TARGET_FILE:SceneVisualiser>)
@@ -25,7 +29,8 @@ endif()
 add_executable(sv_session_tests session_tests.cpp ${PROJECT_SOURCE_DIR}/src/app/session.cpp ${PROJECT_SOURCE_DIR}/src/app/session.h
     ${PROJECT_SOURCE_DIR}/src/app/updater.cpp ${PROJECT_SOURCE_DIR}/src/app/crash_reports.cpp
     ${PROJECT_SOURCE_DIR}/src/app/ai_access.cpp ${PROJECT_SOURCE_DIR}/src/app/view_keys.cpp
-    ${PROJECT_SOURCE_DIR}/src/app/composition_builder.cpp ${PROJECT_SOURCE_DIR}/src/app/pixel_output.cpp)
+    ${PROJECT_SOURCE_DIR}/src/app/composition_builder.cpp ${PROJECT_SOURCE_DIR}/src/app/pixel_output.cpp
+    ${PROJECT_SOURCE_DIR}/src/app/offline_render.cpp ${PROJECT_SOURCE_DIR}/src/app/offline_render.h)
 set_target_properties(sv_session_tests PROPERTIES AUTOMOC ON)
 target_include_directories(sv_session_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/app)
 file(GLOB sv_test_gdtf CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/resources/gdtf/*.gdtf)

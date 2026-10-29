@@ -80,6 +80,9 @@ struct DmxEngine::Impl {
     Pattern pattern = Pattern::off;
     double speed = 1;
     std::vector<GeneratorTarget> targets;
+    GeneratorOptions generator_options;
+    std::vector<std::array<double, 3>> smooth_state; // the mapping transition, per target
+    Clock::time_point last_tick = Clock::now();
     std::function<void(std::uint16_t, const Slots &)> tap;
     OutputConfig out_config;
     udp::endpoint out_self; // where our output packets come from, so they are never taken as input
@@ -98,6 +101,7 @@ struct DmxEngine::Impl {
 
     std::mutex ddp_mutex;
     std::map<std::string, std::vector<std::uint8_t>> ddp_pixels; // set_ddp_pixels, by target key
+    std::vector<Rgb> generator_colours;                          // set_generator_colours
 
     mutable std::mutex bus_mutex; // guards the map, not the buffers
     std::map<std::uint16_t, std::unique_ptr<TripleBuffer<UniverseFrame>>> bus;
@@ -334,7 +338,19 @@ struct DmxEngine::Impl {
             if (pattern != Pattern::off) {
                 std::map<std::uint16_t, Slots> frames;
                 const double t = std::chrono::duration<double>(Clock::now() - started).count();
-                run_generator(pattern, t, speed, targets, frames);
+                std::vector<Rgb> colours;
+                if (pattern == Pattern::mapping) {
+                    std::vector<Rgb> target;
+                    {
+                        std::lock_guard lock(ddp_mutex);
+                        target = generator_colours;
+                    }
+                    const auto now = Clock::now();
+                    const double dt = std::chrono::duration<double, std::milli>(now - last_tick).count();
+                    last_tick = now;
+                    smooth_colours(smooth_state, target, std::clamp(dt, 1.0, 100.0), generator_options, colours);
+                }
+                run_generator(pattern, t, speed, targets, frames, colours);
                 for (auto &[u, data] : frames)
                     if (auto it = universes.find(u); it != universes.end())
                         ingest(u, it->second, {generator_id, "Generator", data, 512, 100, Clock::duration::max()});
@@ -682,6 +698,8 @@ void DmxEngine::set_internal_frame(std::uint16_t universe, std::optional<Slots> 
 
 void DmxEngine::set_generator(Pattern pattern, double speed, std::vector<GeneratorTarget> targets) {
     asio::post(impl_->io, [&m = *impl_, pattern, speed, targets = std::move(targets)]() mutable {
+        if (m.pattern != pattern)
+            m.smooth_state.clear(), m.last_tick = Clock::now();
         m.pattern = pattern, m.speed = speed, m.targets = std::move(targets);
         if (pattern == Pattern::off)
             for (auto &[u, uni] : m.universes)
@@ -705,6 +723,15 @@ void DmxEngine::set_output(OutputConfig config) {
 
 void DmxEngine::set_ddp(std::vector<DdpTarget> targets) {
     asio::post(impl_->io, [&m = *impl_, targets = std::move(targets)]() mutable { m.apply_ddp(std::move(targets)); });
+}
+
+void DmxEngine::set_generator_options(GeneratorOptions options) {
+    asio::post(impl_->io, [&m = *impl_, options] { m.generator_options = options; });
+}
+
+void DmxEngine::set_generator_colours(std::vector<Rgb> colours) {
+    std::lock_guard lock(impl_->ddp_mutex);
+    impl_->generator_colours = std::move(colours);
 }
 
 void DmxEngine::set_ddp_pixels(const std::string &key, std::vector<std::uint8_t> pixels) {

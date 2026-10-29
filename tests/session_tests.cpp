@@ -1,6 +1,7 @@
 #include "session.h"
 
 #include "ai_access.h"
+#include "offline_render.h"
 #include "view_keys.h"
 
 #include "core/interchange.h"
@@ -10,15 +11,15 @@
 
 #include <QElapsedTimer>
 #include <QEventLoop>
-#include <QJsonDocument>
 #include <QGuiApplication>
+#include <QJsonDocument>
+#include <QNetworkDatagram>
 #include <QPainter>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
-#include <QNetworkDatagram>
 #include <QUdpSocket>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
@@ -552,6 +553,8 @@ TEST_CASE("AI tools filter objects, describe types and beams, list files and rep
     CHECK(tool(tools, "apply_patch", {{"patch", json::array()}})["applied"] == 0);
 
     CHECK(tool(tools, "get_project").contains("recentFiles"));
+    CHECK(tool(tools, "get_render")["stages"].contains("draw"));
+    CHECK(tool(tools, "get_render", {{"preview", true}}).contains("frames")); // no frame yet: plain status
     CHECK_THROWS_WITH(tool(tools, "frame", {{"uuids", {uuid}}}), "No viewport (the app runs without a window)");
 
     s.setDebugMode(true, false);
@@ -802,8 +805,8 @@ TEST_CASE("Session drawings: the legend fills the strip left of the title block,
         QImage image(QSize(int(mm.width()), int(mm.height())), QImage::Format_RGBA8888);
         image.fill(Qt::white);
         QPainter p(&image);
-        const QTransform t = sv::render::paint_drawing(p, s.document().data(), *s.library_snapshot(), *s.meshes(),
-                                                       sheet);
+        const QTransform t =
+            sv::render::paint_drawing(p, s.document().data(), *s.library_snapshot(), *s.meshes(), sheet);
         p.end();
         if (to_page)
             *to_page = t;
@@ -1141,6 +1144,89 @@ TEST_CASE("FR-4 saveFixtureType adds a usable type, refuses bundled names, and t
     CHECK_FALSE(s.saveFixtureType(spec).isEmpty());
 }
 
+TEST_CASE("Generator mapping: fixtures take the composition colour under the nearest LED wall (FR-11)") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    s.start_dmx();
+    const auto wait = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    };
+    const sv::json &project = s.document().data();
+    const auto probes = sv::render::mapping_probes(project, *s.library_snapshot());
+    REQUIRE(probes.size() == sv::render::generator_targets(project, *s.library_snapshot()).size());
+    REQUIRE_FALSE(probes.empty());
+    bool inside_a_wall = false;
+    for (const sv::json &p : probes) {
+        REQUIRE(p.is_object()); // the demo rig has walls
+        for (const sv::json &o : project.at("objects"))
+            if (o.value("type", std::string()) == "ledWall") {
+                const sv::json &sl = o.at("slice");
+                inside_a_wall =
+                    inside_a_wall || (p["x"] >= sl["x"] && p["x"] <= sl["x"].get<double>() + sl["w"].get<double>() &&
+                                      p["y"] >= sl["y"] && p["y"] <= sl["y"].get<double>() + sl["h"].get<double>());
+            }
+    }
+    CHECK(inside_a_wall);
+
+    // An LED string right beside a fixture beats the flat walls: the probe lands in the string's slice column,
+    // at the run along the string.
+    {
+        sv::json p2 = s.document().data();
+        sv::json fixture;
+        for (const sv::json &o : p2.at("objects"))
+            if (o.value("type", std::string()) == "fixture" && o.value("patch", sv::json()).is_object()) {
+                fixture = o;
+                break;
+            }
+        REQUIRE(fixture.is_object());
+        const sv::json pos = fixture.at("position");
+        sv::json net = sv::new_led_wall("Net");
+        net["position"] = {pos[0].get<double>() + 0.2, pos[1].get<double>() - 1.0, pos[2].get<double>()};
+        net["strings"] =
+            sv::json::array({sv::json::array({{0, 0, 0}, {0, 2, 0}}), sv::json::array({{1, 0, 0}, {1, 2, 0}})});
+        net["slice"] = {{"x", 1000}, {"y", 100}, {"w", 200}, {"h", 400}};
+        p2["objects"].push_back(net);
+        std::size_t index = 0;
+        for (const sv::json &o : p2.at("objects")) {
+            if (o == fixture)
+                break;
+            if (o.value("type", std::string()) == "fixture" && o.value("patch", sv::json()).is_object())
+                ++index;
+        }
+        const auto probes2 = sv::render::mapping_probes(p2, *s.library_snapshot());
+        REQUIRE(probes2.size() > index);
+        const sv::json &pr = probes2[index];
+        CHECK(pr["x"].get<double>() == Catch::Approx(1050));          // first of two columns
+        CHECK(pr["y"].get<double>() == Catch::Approx(300).margin(1)); // half way up the string
+    }
+
+    const int u = s.universes().at(0).toInt();
+    const auto lit = [&] {
+        for (const auto &st : s.dmx().status())
+            if (st.universe == u)
+                return std::ranges::any_of(st.data, [](auto v) { return v != 0; });
+        return false;
+    };
+    s.setGenerator("bogus");
+    CHECK(s.generator() == "off");
+    Session::setPreference("generatorSmoothMs", 0);
+    Session::setPreference("generatorMax", 0.5); // the ceiling: no mapped slot above 128
+    s.setGenerator("mapping");
+    CHECK(s.generator() == "mapping");
+    wait(1000); // the pixel thread samples the test pattern, the engine ticks at 44 Hz
+    CHECK(lit());
+    for (const auto &st : s.dmx().status())
+        if (st.universe == u)
+            CHECK(std::ranges::max(st.data) <= 128);
+    Session::setPreference("generatorMax", 1.0);
+    s.setGenerator("off");
+    wait(200);
+    CHECK_FALSE(lit());
+}
+
 TEST_CASE("Show recording captures the merged DMX and plays it back over live input, also through MCP") {
     Session s(nullptr);
     s.set_project(sv::demo_project());
@@ -1421,14 +1507,14 @@ TEST_CASE("setLight on one head holds it under heads; the fixture-wide dimmer st
     const auto dir = std::filesystem::temp_directory_path() / "sv_session_tests";
     std::filesystem::create_directories(dir);
     const auto zip = sv::write_zip({{"description.xml", std::vector<std::uint8_t>(xml.begin(), xml.end())}});
-    std::ofstream(dir / "Test@Twin.gdtf", std::ios::binary).write(reinterpret_cast<const char *>(zip.data()),
-                                                                     std::streamsize(zip.size()));
+    std::ofstream(dir / "Test@Twin.gdtf", std::ios::binary)
+        .write(reinterpret_cast<const char *>(zip.data()), std::streamsize(zip.size()));
     Session s(nullptr);
     s.set_project(sv::new_project());
     REQUIRE(s.importGdtf(QUrl::fromLocalFile(QString::fromStdString((dir / "Test@Twin.gdtf").string()))).isEmpty());
-    REQUIRE(s.addObject("fixture", {{"gdtf", "Test@Twin.gdtf"},
-                                    {"mode", "m"},
-                                    {"patch", QVariantMap{{"universe", 1}, {"address", 1}}}})
+    REQUIRE(s.addObject(
+                 "fixture",
+                 {{"gdtf", "Test@Twin.gdtf"}, {"mode", "m"}, {"patch", QVariantMap{{"universe", 1}, {"address", 1}}}})
                 .isEmpty());
     const QString fx = selected(s);
     CHECK(s.controlHeads({fx}) == 2);
@@ -1443,8 +1529,8 @@ TEST_CASE("setLight on one head holds it under heads; the fixture-wide dimmer st
     // What push_programmer sends decodes to a blue head 0 and a red head 1.
     const auto &type = s.library().at("Test@Twin.gdtf");
     std::array<std::uint8_t, 512> frame{};
-    for (const auto &[attrs, head] : {std::pair{json{{"Dimmer", 1.0}}, -1}, {held["heads"]["0"], 0},
-                                      {held["heads"]["1"], 1}})
+    for (const auto &[attrs, head] :
+         {std::pair{json{{"Dimmer", 1.0}}, -1}, {held["heads"]["0"], 0}, {held["heads"]["1"], 1}})
         for (const auto &b : s.encode_fixture(fx.toStdString(), attrs, head, false).bytes)
             frame[b.offset] = b.value;
     const auto a = sv::gdtf::decode(type, *type.mode("m"), frame, 1);
@@ -1465,7 +1551,8 @@ TEST_CASE("editSelection sets a field on the selection in one undo step, filtere
     const QString a = selected(s);
     REQUIRE(s.addObject("shape", {}).isEmpty());
     const QString b = selected(s);
-    REQUIRE(s.addObject("deck", {{"position", QVariantList{9.0, 0.0, 0.0}}, {"width", 4.0}, {"height", 1.0}}).isEmpty());
+    REQUIRE(
+        s.addObject("deck", {{"position", QVariantList{9.0, 0.0, 0.0}}, {"width", 4.0}, {"height", 1.0}}).isEmpty());
     const QString d = selected(s);
     s.selectUuids({a, b, d});
     const auto steps = s.document().history().size();
@@ -1717,4 +1804,178 @@ TEST_CASE("Session sends a DDP wall's composition pixels from its own thread, wh
     CHECK(pushes == 2);
     CHECK(bytes == frame);
     CHECK(lit > 0); // the test pattern, not a black frame
+}
+
+TEST_CASE("Offline render: camera_at eases between keys, holds past both ends and holds missing fields") {
+    CHECK(camera_at(sv::json::array(), 0).empty());
+    const sv::json keys = {{{"t", 0}, {"yaw", 0}, {"target", {0, 0, 0}}, {"fov", 40}},
+                           {{"t", 1000}, {"yaw", 90}, {"target", {2, 4, 6}}},
+                           {{"t", 2000}, {"fov", 60}}};
+    CHECK(camera_at(keys, -500)["yaw"].get<double>() == 0);
+    CHECK_FALSE(camera_at(keys, 0).contains("t"));
+    const sv::json mid = camera_at(keys, 500);
+    CHECK(mid["yaw"].get<double>() == Catch::Approx(45));
+    CHECK(mid["target"][1].get<double>() == Catch::Approx(2));
+    CHECK(mid["fov"].get<double>() == Catch::Approx(40));
+    CHECK(camera_at(keys, 250)["yaw"].get<double>() < 22.5); // eased, not linear
+    const sv::json last = camera_at(keys, 1500);
+    CHECK(last["yaw"].get<double>() == Catch::Approx(90)); // held from the second key
+    CHECK(last["fov"].get<double>() == Catch::Approx(50));
+    CHECK(camera_at(keys, 9000)["fov"].get<double>() == Catch::Approx(60));
+    CHECK(camera_at(sv::json::array({{{"t", 500}, {"yaw", 10}}}), 0)["yaw"].get<double>() == 10);
+}
+
+TEST_CASE("MediaSource stepping hands out every frame in order (section 26)") {
+    sv::media::MediaSource m;
+    const auto wait_until = [](auto pred, int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (!pred() && t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        return pred();
+    };
+    m.open("video", SV_SOURCE_DIR "/tests/fixtures/media/testsrc.mp4");
+    if (!wait_until([&] { return m.duration_ms() > 0; }, 5000)) {
+        WARN("no video decoder, skipping");
+        return;
+    }
+    m.begin_stepping(0);
+    double last_start = -1;
+    quint64 serial = m.serial();
+    int frames = 0;
+    for (double t = 0; t < 1000; t += 1000.0 / 30, ++frames) {
+        REQUIRE(wait_until([&] { return m.shows(t); }, 3000));
+        const auto [from, to] = m.frame_span();
+        CHECK(from <= t + 1);
+        CHECK(to > t);
+        CHECK(from >= last_start);
+        last_start = from;
+        const quint64 now = m.serial();
+        CHECK(now >= serial);
+        serial = now;
+        CHECK(m.shows(t)); // the same t again: nothing new
+        CHECK(m.serial() == serial);
+    }
+    CHECK(m.stepping_gaps() == 0);
+    CHECK(wait_until([&] { return m.shows(double(m.duration_ms()) + 500); }, 5000)); // past the end: held
+    m.end_stepping();
+}
+
+TEST_CASE("MediaSource stepping starts at the seek target even while the video is playing (section 26)") {
+    sv::media::MediaSource m;
+    const auto wait_until = [](auto pred, int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (!pred() && t.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        return pred();
+    };
+    m.open("video", SV_SOURCE_DIR "/tests/fixtures/media/testsrc.mp4");
+    if (!wait_until([&] { return m.duration_ms() > 0; }, 5000)) {
+        WARN("no video decoder, skipping");
+        return;
+    }
+    for (const double target : {1500.0, 300.0, 1200.0}) { // ahead of, behind and again ahead of the live position
+        m.set_playback(true, true, 1.0);
+        wait_until([&] { return false; }, 400); // frames keep arriving from the live position
+        m.begin_stepping(qint64(target) + 1);
+        REQUIRE(wait_until([&] { return m.shows(target); }, 3000));
+        const auto [from, to] = m.frame_span();
+        CHECK(from <= target + 1);
+        CHECK(from > target - 200);
+        CHECK(to > target);
+        m.end_stepping();
+    }
+}
+
+TEST_CASE("Offline render needs no window, and refuses without a path and while recording") {
+    Session s(nullptr);
+    s.set_project(sv::demo_project());
+    const QString mp4 = QString::fromStdString((std::filesystem::temp_directory_path() / "sv_render.mp4").string());
+    CHECK(s.startRender({}) == "Give the mp4 to render to");
+    // No window at all: the render draws on its own device, as it must while the app is minimised. Cinematic (the
+    // default) with motion-blur sub-frames.
+    const QString e =
+        s.startRender({{"path", mp4}, {"duration", 300}, {"fps", 10}, {"width", 64}, {"height", 36}, {"samples", 2}});
+    if (e.isEmpty()) {
+        QElapsedTimer clock;
+        clock.start();
+        while (s.recording()["render"].toMap()["active"].toBool() && clock.elapsed() < 30000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        const QVariantMap r = s.recording()["render"].toMap();
+        CHECK(r["error"].toString() == "");
+        CHECK(r["frame"].toInt() == 3);
+        // Progress for the render screen and MCP get_render: stage times, rate, device, preview.
+        const QVariantMap st = r["stages"].toMap();
+        for (const char *k : {"waitVideo", "waitDmx", "waitEncoder", "build", "draw", "readback", "push"}) {
+            REQUIRE(st.contains(k));
+            CHECK(st[k].toDouble() >= 0);
+        }
+        CHECK(st["draw"].toDouble() > 0);
+        CHECK(r["elapsedMs"].toLongLong() > 0);
+        CHECK(r["previewSerial"].toULongLong() >= 1);
+        CHECK_FALSE(r["backend"].toString().isEmpty());
+        CHECK(r["quality"].toString() == "cinematic");
+        CHECK(r["supersample"].toBool());
+        CHECK(r["uiMs"].toDouble() >= 0);
+        CHECK(s.renderPreview().width() == 64);
+        // Without supersampling the draw is the output size; the job still completes.
+        REQUIRE(
+            s.startRender(
+                 {{"path", mp4}, {"duration", 300}, {"fps", 10}, {"width", 64}, {"height", 36}, {"supersample", false}})
+                .isEmpty());
+        clock.restart();
+        while (s.recording()["render"].toMap()["active"].toBool() && clock.elapsed() < 30000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        const QVariantMap r2 = s.recording()["render"].toMap();
+        CHECK(r2["frame"].toInt() == 3);
+        CHECK_FALSE(r2["supersample"].toBool());
+    } else {
+        CHECK(e == "No graphics device to render with"); // offscreen platform without GL
+    }
+    CHECK_FALSE(s.recording()["render"].toMap()["active"].toBool());
+    if (e.isEmpty()) { // stopping while a frame is on the worker thread waits for it and closes the file
+        REQUIRE(s.startRender({{"path", mp4},
+                               {"duration", 10000},
+                               {"fps", 10},
+                               {"width", 64},
+                               {"height", 36},
+                               {"samples", 1},
+                               {"quality", "high"}})
+                    .isEmpty());
+        QElapsedTimer clock;
+        clock.start();
+        while (s.recording()["render"].toMap()["frame"].toInt() < 2 && clock.elapsed() < 30000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        s.stopRender();
+        CHECK_FALSE(s.recording()["render"].toMap()["active"].toBool());
+        CHECK(s.recording()["render"].toMap()["error"].toString() == "Stopped");
+    }
+    // A composition video steps frame by frame, without gaps.
+    if (e.isEmpty() &&
+        s.setMediaFile("video", QUrl::fromLocalFile(SV_SOURCE_DIR "/tests/fixtures/media/testsrc.mp4")).isEmpty()) {
+        QElapsedTimer clock;
+        clock.start();
+        while (s.media_status()["width"].toInt() == 0 && clock.elapsed() < 5000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        REQUIRE(s.startRender({{"path", mp4},
+                               {"duration", 1000},
+                               {"fps", 10},
+                               {"width", 64},
+                               {"height", 36},
+                               {"samples", 1},
+                               {"quality", "high"}})
+                    .isEmpty());
+        clock.restart();
+        while (s.recording()["render"].toMap()["active"].toBool() && clock.elapsed() < 60000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        const QVariantMap r = s.recording()["render"].toMap();
+        CHECK(r["error"].toString() == "");
+        CHECK(r["frame"].toInt() == 10);
+        CHECK(r["videoGaps"].toInt() == 0);
+    }
+    const QString base = QString::fromStdString((std::filesystem::temp_directory_path() / "sv_render_take").string());
+    REQUIRE(s.startRecording(QUrl::fromLocalFile(base), false).isEmpty());
+    CHECK(s.startRender({{"path", mp4}}) == "Stop recording before rendering");
+    s.stopRecording();
 }

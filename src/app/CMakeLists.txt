@@ -1,12 +1,12 @@
 qt_add_executable(SceneVisualiser WIN32 MACOSX_BUNDLE channel_grid.cpp channel_grid.h drawing_item.cpp drawing_item.h ai_access.cpp ai_access.h main.cpp session.cpp session.h universe_meter.cpp universe_meter.h
-    viewport_item.cpp viewport_item.h composition_builder.cpp composition_builder.h pixel_output.cpp pixel_output.h view_keys.cpp view_keys.h updater.cpp updater.h crash_reports.cpp crash_reports.h)
+    viewport_item.cpp viewport_item.h composition_builder.cpp composition_builder.h pixel_output.cpp pixel_output.h offline_render.cpp offline_render.h view_keys.cpp view_keys.h updater.cpp updater.h crash_reports.cpp crash_reports.h)
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 qt_add_qml_module(SceneVisualiser
     URI SceneVisualiser
     QML_FILES qml/Main.qml qml/Theme.qml qml/Card.qml qml/Field.qml qml/RailButton.qml qml/HudButton.qml
               qml/Objects.qml qml/Inspector.qml qml/ProjectScreen.qml qml/KeysCard.qml
               qml/PatchScreen.qml qml/DmxScreen.qml qml/ControlScreen.qml qml/Input.qml qml/Check.qml
-              qml/MediaCard.qml qml/RecordCard.qml qml/MappingScreen.qml qml/PlanScreen.qml qml/ResolumeParams.qml qml/AiPanel.qml qml/Palette.qml qml/ArrayDialog.qml qml/FixtureTypeDialog.qml qml/NewProjectWizard.qml
+              qml/MediaCard.qml qml/RecordCard.qml qml/RenderScreen.qml qml/MappingScreen.qml qml/PlanScreen.qml qml/ResolumeParams.qml qml/AiPanel.qml qml/Palette.qml qml/ArrayDialog.qml qml/FixtureTypeDialog.qml qml/NewProjectWizard.qml
     RESOURCES qml/icons/design.svg qml/icons/patch.svg qml/icons/dmx.svg qml/icons/project.svg qml/icons/mapping.svg qml/icons/plan.svg qml/icons/build.svg qml/icons/control.svg)
 file(GLOB sv_bundled_gdtf CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/resources/gdtf/*.gdtf)
 qt_add_resources(SceneVisualiser "bundled_gdtf" PREFIX "/gdtf" BASE ${PROJECT_SOURCE_DIR}/resources/gdtf FILES ${sv_bundled_gdtf})

@@ -24,13 +24,14 @@ class PixelOutput {
         CompositionBuilder::Sources feeds, recorded;
         std::map<std::string, double> opacity;
         std::vector<Target> targets;
+        std::vector<sv::json> probes; // Pattern::mapping: one composition point per generator target
         double rate_hz = 44;
     };
 
     PixelOutput(sv::proto::DmxEngine &dmx, const sv::media::MediaSource &media) : dmx_(dmx), media_(media) {}
     ~PixelOutput() { set({}); }
 
-    // UI thread. Starts the thread when there are targets, stops it when there are none.
+    // UI thread. Starts the thread when there are targets or probes, stops it when there are none.
     void set(Inputs inputs);
 
   private:

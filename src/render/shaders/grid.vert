@@ -5,7 +5,7 @@ layout(location = 0) out vec3 v_world;
 layout(std140, binding = 0) uniform Frame {
     mat4 view_proj;
     vec4 eye;        // w: time in seconds
-    vec4 light;      // xyz: direction toward the light
+    vec4 light;      // xyz: direction toward the light, w: 1 when drawing into the HDR target
     vec4 floor_info; // venue half width, half depth, haze, floor spot count
     vec4 venue;
     vec4 spot_pos[32]; // x, z centre, radius

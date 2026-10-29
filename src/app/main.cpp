@@ -12,6 +12,7 @@
 #include <QGuiApplication>
 #include <QMutex>
 #include <QQmlApplicationEngine>
+#include <QLoggingCategory>
 #include <QQuickImageProvider>
 #include <QQuickStyle>
 #include <QQuickWindow>
@@ -38,6 +39,16 @@ class CompositionProvider : public QQuickImageProvider {
             img = s->composition();
         else if (img.size() != s->composition().size())
             img = sv::render::make_composition(*s->snapshot(), img); // placed by source.fit, as on the walls
+        *size = img.size();
+        return img;
+    }
+};
+
+class RenderPreviewProvider : public QQuickImageProvider {
+  public:
+    RenderPreviewProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
+    QImage requestImage(const QString &, QSize *size, const QSize &) override {
+        const QImage img = Session::instance()->renderPreview();
         *size = img.size();
         return img;
     }
@@ -109,10 +120,10 @@ int main(int argc, char *argv[]) {
     QCommandLineOption generator("generator", "Run an internal test pattern: off, full, chase, rainbow, sweep.",
                                  "pattern", "off");
     args.addOption(generator);
-    QCommandLineOption screen(
-        "screen",
-        "Start on a screen: design, build (design with the Build palette), patch, dmx, control, plan, mapping, project.", "name",
-        "design");
+    QCommandLineOption screen("screen",
+                              "Start on a screen: design, build (design with the Build palette), patch, dmx, control, "
+                              "plan, mapping, project.",
+                              "name", "design");
     args.addOption(screen);
     QCommandLineOption mcp("mcp", "Turn AI access (MCP) on for this run, whatever the preference says.");
     args.addOption(mcp);
@@ -130,19 +141,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     session.start_dmx();
-    static const std::map<QString, sv::proto::Pattern> patterns{{"off", sv::proto::Pattern::off},
-                                                                {"full", sv::proto::Pattern::full},
-                                                                {"chase", sv::proto::Pattern::chase},
-                                                                {"rainbow", sv::proto::Pattern::rainbow},
-                                                                {"sweep", sv::proto::Pattern::sweep}};
-    if (auto it = patterns.find(args.value(generator)); it != patterns.end())
-        session.set_generator(it->second);
+    session.setGenerator(args.value(generator));
+    QLoggingCategory::setFilterRules(QLatin1StringView(Session::encoder_log_rule));
 
     FileOpenFilter file_open;
     app.installEventFilter(&file_open);
 
     QQmlApplicationEngine engine;
     engine.addImageProvider("composition", new CompositionProvider);
+    engine.addImageProvider("render", new RenderPreviewProvider);
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); },
         Qt::QueuedConnection);

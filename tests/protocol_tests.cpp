@@ -178,6 +178,57 @@ TEST_CASE("Generators: full puts pan/tilt at centre, pixel cells get colour") {
     CHECK(frames.empty());
 }
 
+TEST_CASE("Generators: mapping colours smooth over time and clip at the ceiling") {
+    std::vector<std::array<double, 3>> state;
+    std::vector<Rgb> out;
+    const std::vector<Rgb> target{{255, 0, 100}};
+    smooth_colours(state, target, 23, {0, 1.0}, out); // off: copies
+    CHECK(out[0] == target[0]);
+    state.clear();
+    smooth_colours(state, target, 23, {100, 1.0}, out); // one 23 ms tick with a 100 ms constant: ~19 %
+    CHECK(out[0][0] == 48);
+    for (int i = 0; i < 43; ++i)
+        smooth_colours(state, target, 23, {100, 1.0}, out);
+    CHECK(out[0][0] == 255); // converged within a second
+    CHECK(out[0][2] == 100);
+    smooth_colours(state, target, 23, {100, 0.5}, out); // the ceiling: 255 -> 128 (the state keeps going)
+    CHECK(out[0][0] == 128);
+    CHECK(out[0][2] == 100);
+    smooth_colours(state, {}, 23, {100, 1.0}, out); // fewer targets shrink the state
+    CHECK(state.empty());
+    CHECK(out.empty());
+}
+
+TEST_CASE("Generators: mapping writes each target's colour as dimmer, RGB, CMY and cells") {
+    GeneratorTarget f{.universe = 1,
+                      .address = 1,
+                      .channels = {{"Dimmer", 0},
+                                   {"ColorAdd_R", 1},
+                                   {"ColorAdd_G", 2},
+                                   {"ColorAdd_B", 3},
+                                   {"ColorSub_C", 4},
+                                   {"Pan", 5},
+                                   {"Shutter1", 6}}};
+    f.cells = {{7, 8, 9}};
+    std::map<std::uint16_t, Slots> frames;
+    const std::vector<Rgb> colours{{200, 50, 0}};
+    run_generator(Pattern::mapping, 0, 1, {f}, frames, colours);
+    CHECK(frames[1][0] == 200); // dimmer = brightest component
+    CHECK(frames[1][1] == 200);
+    CHECK(frames[1][2] == 50);
+    CHECK(frames[1][3] == 0);
+    CHECK(frames[1][4] == 55); // cyan = 255 - red
+    CHECK(frames[1][5] == 128);
+    CHECK(frames[1][6] == 0); // not a generator attribute: untouched
+    CHECK(frames[1][7] == 200);
+    CHECK(frames[1][9] == 0);
+    // A target without a colour is black.
+    frames.clear();
+    run_generator(Pattern::mapping, 0, 1, {f}, frames, {});
+    CHECK(frames[1][0] == 0);
+    CHECK(frames[1][4] == 255);
+}
+
 namespace {
 
 struct Sender {
@@ -301,9 +352,9 @@ PlaybackMix recorded(Slots frame, std::uint8_t weight = 255) {
 
 TEST_CASE("Playback mix: weight crossfades, snap switches at half, HTP takes the max, 16-bit pairs fade whole") {
     Slots live{}, rec{};
-    live[0] = 0, rec[0] = 200;     // continuous
-    live[1] = 3, rec[1] = 9;       // snap (a wheel)
-    live[2] = 120, rec[2] = 40;    // htp
+    live[0] = 0, rec[0] = 200;      // continuous
+    live[1] = 3, rec[1] = 9;        // snap (a wheel)
+    live[2] = 120, rec[2] = 40;     // htp
     live[3] = 0x00, live[4] = 0xFF; // 16-bit 0x00FF
     rec[3] = 0x02, rec[4] = 0x01;   // 16-bit 0x0201
     PlaybackMix m = recorded(rec, 128);
@@ -363,7 +414,8 @@ TEST_CASE("DmxEngine output sends published universes as ArtDmx at the offset, a
     asio::ip::udp::socket rx{io, asio::ip::udp::endpoint(asio::ip::make_address("127.0.0.1"), 0)};
     rx.non_blocking(true);
     // Unicast to the test socket, then to the engine's own input: the loop guard must drop that one.
-    engine.set_output({.enabled = true, .target = "127.0.0.1", .port = rx.local_endpoint().port(), .universe_offset = 4});
+    engine.set_output(
+        {.enabled = true, .target = "127.0.0.1", .port = rx.local_endpoint().port(), .universe_offset = 4});
     engine.set_internal_frame(1, Slots{77});
     std::array<std::uint8_t, 600> buf;
     std::size_t n = 0;
@@ -394,8 +446,8 @@ TEST_CASE("DmxEngine sACN output carries priority and its own CID") {
     asio::io_context io;
     asio::ip::udp::socket rx{io, asio::ip::udp::endpoint(asio::ip::make_address("127.0.0.1"), 0)};
     rx.non_blocking(true);
-    engine.set_output({.enabled = true, .sacn = true, .target = "127.0.0.1", .port = rx.local_endpoint().port(),
-                       .priority = 150});
+    engine.set_output(
+        {.enabled = true, .sacn = true, .target = "127.0.0.1", .port = rx.local_endpoint().port(), .priority = 150});
     engine.set_internal_frame(3, Slots{9});
     std::array<std::uint8_t, 700> buf;
     std::size_t n = 0;
@@ -489,8 +541,7 @@ TEST_CASE("DmxEngine DDP output: universe bytes and set pixels, split at 1440, o
         while (std::size_t n = rx.receive(asio::buffer(buf), 0, ec)) {
             if (ec || n < 10)
                 break;
-            got.push_back({(buf[0] & 1) != 0,
-                           std::uint32_t(buf[4] << 24 | buf[5] << 16 | buf[6] << 8 | buf[7]),
+            got.push_back({(buf[0] & 1) != 0, std::uint32_t(buf[4] << 24 | buf[5] << 16 | buf[6] << 8 | buf[7]),
                            std::size_t(buf[8] << 8 | buf[9]), buf[10]});
         }
         return std::ranges::count(got, true, &Got::push) >= 2; // a whole frame after the first PUSH

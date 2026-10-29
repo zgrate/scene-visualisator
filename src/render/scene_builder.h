@@ -101,6 +101,10 @@ std::vector<std::uint8_t> export_fbx(const json &project, const FixtureLibrary &
                                      const std::set<std::string> &only = {});
 // What the internal generators (FR-11) drive for each patched fixture of a known type.
 std::vector<proto::GeneratorTarget> generator_targets(const json &project, const FixtureLibrary &library);
+// Pattern::mapping: for every fixture generator_targets lists (same order), the composition point (a zero-size
+// `slice` {x, y, w, h} in composition pixels) under the nearest point of the nearest LED wall or LED string. Null when
+// there is no wall.
+std::vector<json> mapping_probes(const json &project, const FixtureLibrary &library);
 
 // An object's local-to-world matrix with its parents applied (T·Ry·Rx·Rz·S per level).
 QMatrix4x4 world_transform(const json &project, const json &object);

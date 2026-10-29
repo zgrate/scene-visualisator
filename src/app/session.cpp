@@ -22,6 +22,8 @@
 #include <QJsonObject>
 #include <QLoggingCategory>
 #include <QPdfWriter>
+#include <QQuickItem>
+#include <QQuickWindow>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
@@ -142,7 +144,13 @@ Session::Session(QObject *parent) : QObject(parent) {
         status_ = dmx_.status();
         if (!pixel_targets_.empty())
             push_pixel_inputs(); // feeds and playback fades change without a document edit
-        Q_EMIT dmxChanged();
+        // A render runs on this thread: 4 Hz of meters and progress is plenty while it does.
+        if (render_.active() && ++status_ticks_ % 5 != 0)
+            return;
+        QElapsedTimer clock;
+        clock.start(); // QML re-evaluates every binding on the status maps inside the emit
+        notify_dmx();
+        ui_tick_ms_ = ui_tick_ms_ * 0.8 + double(clock.nsecsElapsed()) / 1e6 * 0.2;
     });
     status_timer_.start();
     playback_timer_.setInterval(23); // 44 Hz, the DMX refresh rate
@@ -153,7 +161,7 @@ Session::Session(QObject *parent) : QObject(parent) {
 }
 
 Session::~Session() {
-    stop_ai();       // before anything a tool could reach
+    stop_ai(); // before anything a tool could reach
     pixel_output_.set({});
     stopRecording(); // finalises the files
     dmx_.stop();
@@ -201,8 +209,33 @@ void Session::start_dmx() {
 }
 
 void Session::set_generator(sv::proto::Pattern pattern) {
+    const bool changed = pattern_ != pattern;
     pattern_ = pattern;
+    apply_generator_options();
     dmx_.set_generator(pattern_, 1.0, sv::render::generator_targets(document_.data(), library_));
+    mapping_probes_ = pattern == sv::proto::Pattern::mapping ? sv::render::mapping_probes(document_.data(), library_)
+                                                             : std::vector<sv::json>();
+    push_pixel_inputs();
+    if (changed)
+        Q_EMIT this->changed();
+}
+
+void Session::apply_generator_options() {
+    dmx_.set_generator_options({std::clamp(preference("generatorSmoothMs", 150).toDouble(), 0.0, 5000.0),
+                                std::clamp(preference("generatorMax", 1.0).toDouble(), 0.0, 1.0)});
+}
+
+QString Session::generator() const {
+    for (const auto &[name, pattern] : sv::proto::pattern_names)
+        if (pattern == pattern_)
+            return name;
+    return "off";
+}
+
+void Session::setGenerator(const QString &name) {
+    for (const auto &[n, pattern] : sv::proto::pattern_names)
+        if (name == n)
+            set_generator(pattern);
 }
 
 void Session::refresh() {
@@ -371,7 +404,7 @@ QVariantList Session::universes() const {
     return {u.begin(), u.end()};
 }
 
-QVariantMap Session::dmx_status() const {
+QVariantMap Session::dmx_status_now() const {
     double artnet = -1, sacn = -1;
     QVariantMap per;
     for (const sv::proto::UniverseStatus &st : status_) {
@@ -676,7 +709,8 @@ QString Session::editSelection(const QString &pointer, const QVariant &value, co
             continue;
         const json::json_pointer ptr(pointer.toStdString());
         if (!objects[i].contains(ptr) || objects[i].at(ptr) != v)
-            patch.push_back({{"op", "add"}, {"path", "/objects/" + std::to_string(i) + pointer.toStdString()}, {"value", v}});
+            patch.push_back(
+                {{"op", "add"}, {"path", "/objects/" + std::to_string(i) + pointer.toStdString()}, {"value", v}});
     }
     return patch.empty() ? QString() : QString::fromStdString(try_apply(patch, "Edit selection"));
 }
@@ -688,7 +722,8 @@ QString Session::fitVenue() {
         if (b.uuid.starts_with("gizmo:"))
             continue;
         for (int c = 0; c < 8; ++c) {
-            const QVector3D p = b.model.map(QVector3D(c & 1 ? 0.5f : -0.5f, c & 2 ? 0.5f : -0.5f, c & 4 ? 0.5f : -0.5f));
+            const QVector3D p =
+                b.model.map(QVector3D(c & 1 ? 0.5f : -0.5f, c & 2 ? 0.5f : -0.5f, c & 4 ? 0.5f : -0.5f));
             x = std::max(x, double(std::abs(p.x()))), z = std::max(z, double(std::abs(p.z())));
             top = std::max(top, double(p.y()));
         }
@@ -697,11 +732,13 @@ QString Session::fitVenue() {
         return tr("Nothing to fit");
     const auto up = [](double m) { return std::ceil(m * 2) / 2; }; // to 0.5 m
     const json &venue = document_.data().at("venue");
-    return QString::fromStdString(try_apply(
-        json::array({{{"op", "add"}, {"path", "/venue/width"}, {"value", up(2 * x)}},
-                     {{"op", "add"}, {"path", "/venue/depth"}, {"value", up(2 * z)}},
-                     {{"op", "add"}, {"path", "/venue/height"}, {"value", std::max(venue.value("height", 0.0), up(top + 0.5))}}}),
-        "Fit venue"));
+    return QString::fromStdString(
+        try_apply(json::array({{{"op", "add"}, {"path", "/venue/width"}, {"value", up(2 * x)}},
+                               {{"op", "add"}, {"path", "/venue/depth"}, {"value", up(2 * z)}},
+                               {{"op", "add"},
+                                {"path", "/venue/height"},
+                                {"value", std::max(venue.value("height", 0.0), up(top + 0.5))}}}),
+                  "Fit venue"));
 }
 
 void Session::undo() {
@@ -1253,7 +1290,8 @@ void Session::update_media() {
         media_.open(live ? QString::fromStdString(kind) : QString(),
                     kind == "video" ? path_of_file() : QString::fromStdString(opened["name"].get<std::string>()));
     }
-    if (kind == "video" && src.is_object() && std::ranges::find(playback_sources_, &media_) == playback_sources_.end())
+    if (kind == "video" && src.is_object() && !render_.active() &&
+        std::ranges::find(playback_sources_, &media_) == playback_sources_.end())
         media_.set_playback(src.value("playing", true), src.value("loop", true), src.value("rate", 1.0));
 
     std::map<std::string, json> wanted; // output uuid -> feed {kind, name}
@@ -1347,7 +1385,7 @@ std::vector<std::pair<std::string, const sv::media::MediaSource *>> Session::fee
     return out;
 }
 
-QVariantList Session::feed_status() const {
+QVariantList Session::feed_status_now() const {
     QVariantList rows;
     const json &data = document_.data();
     if (!data.contains("outputs") || !data.at("outputs").is_array())
@@ -1416,7 +1454,7 @@ QString Session::connectResolumeFeeds() {
     return tr("%1 of %2 NDI outputs connected").arg(matches.size()).arg(ndi);
 }
 
-QVariantMap Session::media_status() const {
+QVariantMap Session::media_status_now() const {
     const sv::media::MediaStatus st = media_.status();
     const json &comp = document_.data().value("composition", json::object());
     const json &src = comp.value("source", json::object());
@@ -1430,7 +1468,22 @@ QVariantMap Session::media_status() const {
             {"error", st.error}};
 }
 
-QVariantMap Session::recording() const {
+void Session::notify_dmx() {
+    status_cache_ = {recording_now(),     dmx_status_now(), media_status_now(),
+                     output_status_now(), ai_status_now(),  feed_status_now()};
+    status_cached_ = true; // every binding evaluated by the emit reads these maps
+    Q_EMIT dmxChanged();
+    status_cached_ = false;
+}
+
+QVariantMap Session::recording() const { return status_cached_ ? status_cache_.recording : recording_now(); }
+QVariantMap Session::dmx_status() const { return status_cached_ ? status_cache_.dmx : dmx_status_now(); }
+QVariantMap Session::media_status() const { return status_cached_ ? status_cache_.media : media_status_now(); }
+QVariantMap Session::output_status() const { return status_cached_ ? status_cache_.output : output_status_now(); }
+QVariantMap Session::ai_status() const { return status_cached_ ? status_cache_.ai : ai_status_now(); }
+QVariantList Session::feed_status() const { return status_cached_ ? status_cache_.feed : feed_status_now(); }
+
+QVariantMap Session::recording_now() const {
     return {{"active", bool(recorder_)},
             {"playing", bool(playback_)},
             {"paused", playback_paused_},
@@ -1466,6 +1519,8 @@ QVariantMap Session::recording() const {
              }()},
             {"hasVideo", recorder_ ? record_video_ : playback_video_},
             {"lossless", preference("recordLossless", false).toBool()}, // the registry stores text
+            {"view", view_recorder_.active()},
+            {"render", render_.status()},
             {"error", record_error_}};
 }
 
@@ -1484,9 +1539,11 @@ QString feed_file_part(QString name) { // an output name made safe for "<base>.<
 }
 } // namespace
 
-QString Session::startRecording(const QUrl &url, bool lossless) {
+QString Session::startRecording(const QUrl &url, bool lossless, bool view) {
     if (playback_)
         return tr("Stop playback before recording");
+    if (render_.active())
+        return tr("Stop the render before recording");
     stopRecording();
     const QString base = recording_base(url.toLocalFile());
     auto rec = std::make_shared<Recorder>();
@@ -1496,6 +1553,7 @@ QString Session::startRecording(const QUrl &url, bool lossless) {
         return QString::fromUtf8(e.what());
     }
     setPreference("recordLossless", lossless);
+    setPreference("recordView", view);
     for (const auto &st : dmx_.status()) // the state at t = 0, for universes that hold still
         rec->writer->write(0, st.universe, st.data);
     rec->clock.start();
@@ -1512,6 +1570,13 @@ QString Session::startRecording(const QUrl &url, bool lossless) {
     record_video_ = media_.active();
     if (record_video_)
         record_error_ = media_.start_recording(base + ".mp4", lossless);
+    if (view) {
+        record_video_ = true;
+        if (const QString error = view_recorder_.start(
+                base + ".view.mp4", lossless, [this](const QString &e) { record_error_ = tr("Recording: %1").arg(e); });
+            !error.isEmpty())
+            record_error_ = error;
+    }
     // shortcut: feeds are started together, not frame-locked; sync drift of a frame or two is expected.
     for (const json &out : document_.data().value("outputs", json::array()))
         if (const auto it = feeds_.find(out.value("uuid", std::string()));
@@ -1537,13 +1602,84 @@ void Session::stopRecording() {
     }
     recorder_.reset();
     media_.stop_recording();
+    view_recorder_.stop();
     for (const auto &[uuid, feed] : feeds_)
         feed.first->stop_recording();
 }
 
+QString Session::startRender(const QVariantMap &options) {
+    if (recorder_)
+        return tr("Stop recording before rendering");
+    if (render_.active())
+        return tr("A render is already running");
+    const QString path = options.value("path").toUrl().isLocalFile() ? options.value("path").toUrl().toLocalFile()
+                                                                     : options.value("path").toString();
+    if (path.isEmpty())
+        return tr("Give the mp4 to render to");
+    const bool video =
+        !playback_ && media_.active() &&
+        document_.data().value("composition", json::object()).value("source", json::object()).value("kind", "") ==
+            "video";
+    OfflineRender::Job job;
+    job.path = path;
+    job.fps = options.value("fps", 30).toDouble();
+    job.start_ms = std::max(0.0, options.value("start", 0).toDouble());
+    const double length = playback_ ? double(playback_->duration_ms()) : video ? double(media_.duration_ms()) : 0;
+    job.duration_ms = options.contains("duration") ? options.value("duration").toDouble() : length - job.start_ms;
+    job.size = QSize(options.value("width", 1920).toInt(), options.value("height", 1080).toInt());
+    job.lossless = options.value("lossless", false).toBool();
+    job.cinematic = options.value("quality", "cinematic").toString() != "high";
+    job.samples = options.value("samples", 0).toInt();
+    job.supersample = options.value("supersample", true).toBool();
+    job.camera = from_variant(options.value("camera", QVariantList()));
+    if (QQuickItem *viewport = window() ? window()->findChild<QQuickItem *>("viewport") : nullptr) {
+        QVariantMap state; // starts from the 3D view's camera
+        QMetaObject::invokeMethod(viewport, "cameraState", Q_RETURN_ARG(QVariantMap, state));
+        job.view = from_variant(state);
+    }
+
+    render_paused_before_ = playback_paused_;
+    // Videos step sequentially from the first frame on (MediaSource::begin_stepping); only the take's DMX is seeked.
+    const auto seek = [this, video, start = job.start_ms](double t) -> OfflineRender::Inputs {
+        const qint64 ms = qint64(std::ceil(t)) + 1; // the frame starting strictly before ms, as a paused seek shows
+        if (playback_) {                            // the take: its videos and its DMX, held at t
+            playback_timer_.stop();
+            if (t == start)
+                for (sv::media::MediaSource *source : playback_sources_)
+                    source->begin_stepping(ms);
+            playback_send(qint64(t));
+            return {playback_sources_, true};
+        }
+        if (video) {
+            if (t == start)
+                media_.begin_stepping(ms);
+            return {{&media_}, false};
+        }
+        return {};
+    };
+    const auto done = [this] { // inputs back to running
+        for (sv::media::MediaSource *source : playback_sources_)
+            source->end_stepping();
+        media_.end_stepping();
+        if (playback_) {
+            for (sv::media::MediaSource *source : playback_sources_)
+                source->set_playback(!render_paused_before_, true, 1.0);
+            playback_timer_.start();
+        }
+        update_media(); // the composition video's own play state
+        notify_dmx();
+    };
+    return render_.start(
+        std::move(job), seek, [this] { return dmx_.publish_serial(); }, done, [this] { return ui_tick_ms_; });
+}
+
+void Session::stopRender() { render_.stop(tr("Stopped")); }
+
 QString Session::startPlayback(const QUrl &url) {
     if (recorder_)
         return tr("Stop recording before playing back");
+    if (render_.active())
+        return tr("Stop the render before playing back");
     stopPlayback();
     const QString path = url.toLocalFile();
     try {
@@ -1637,7 +1773,7 @@ QString Session::setPlaybackChase(bool on, const QString &offset) {
     if (!ok && !offset.trimmed().isEmpty())
         return tr("Timecode offset is HH:MM:SS:FF");
     const qint64 fps = qRound(dmx_.timecode().fps); // frames of the offset count at the incoming rate
-    if (ok) // empty keeps the offset
+    if (ok)                                         // empty keeps the offset
         chase_offset_ms_ = ((f[0] * 60ll + f[1]) * 60 + f[2]) * 1000 + f[3] * 1000 / std::max<qint64>(fps, 1);
     if (on == chase_)
         return {};
@@ -1653,7 +1789,7 @@ QString Session::setPlaybackChase(bool on, const QString &offset) {
                 source->set_playback(!playback_paused_, true, 1.0);
         }
     }
-    Q_EMIT dmxChanged();
+    notify_dmx();
     return {};
 }
 
@@ -1686,7 +1822,7 @@ void Session::setPlaybackScope(const QString &key, const QString &mode) {
     playback_mix_dirty_ = true;
     resend_playback();
     update_ndi_out();
-    Q_EMIT dmxChanged();
+    notify_dmx();
 }
 
 void Session::setPlaybackScopeFade(const QString &key, double fade) {
@@ -1697,14 +1833,14 @@ void Session::setPlaybackScopeFade(const QString &key, double fade) {
     playback_mix_dirty_ = true;
     resend_playback();
     update_ndi_out();
-    Q_EMIT dmxChanged();
+    notify_dmx();
 }
 
 void Session::setPlaybackFade(double fade) {
     playback_fade_ = std::clamp(fade, 0.0, 1.0);
     resend_playback();
     update_ndi_out();
-    Q_EMIT dmxChanged();
+    notify_dmx();
 }
 
 const std::map<std::uint16_t, sv::proto::PlaybackMix> &Session::playback_mix() {
@@ -1860,6 +1996,10 @@ void Session::playback_tick() {
         playback_start_ms_ = t = 0;
         playback_clock_.restart();
     }
+    playback_send(t);
+}
+
+void Session::playback_send(qint64 t) {
     try {
         for (const auto &[universe, data] : playback_->state_at(std::uint32_t(std::max<qint64>(t, 0)))) {
             auto [it, added] = playback_sent_.try_emplace(universe, data);
@@ -2396,12 +2536,14 @@ void Session::setPreference(const QString &key, const QVariant &value) {
     if (key == "autoUpdate")
         return sv::updater::set_automatic(value.toBool());
     settings().setValue(key, value);
-    if (key == "controls" && instance())
+    if ((key == "controls" || key == "renderQuality") && instance())
         Q_EMIT instance()->changed();
     if (key == "crashReports")
         sv::crash::set_consent(value.toBool());
     if (key.startsWith("output") && instance())
         instance()->apply_output();
+    if (key.startsWith("generator") && instance())
+        instance()->apply_generator_options();
 }
 
 void Session::apply_output() {
@@ -2415,7 +2557,7 @@ void Session::apply_output() {
     update_ndi_out();
 }
 
-QVariantMap Session::output_status() const {
+QVariantMap Session::output_status_now() const {
     const sv::proto::OutputStatus st = dmx_.output_status();
     return {{"enabled", preference("outputEnabled", false).toBool()}, // the engine's own status lags by a post
             {"protocol", preference("outputProtocol", "artnet").toString()},
@@ -2452,8 +2594,8 @@ void Session::update_ddp() {
         if (type == "ledWall") {
             const auto derived = sv::wall_derived(o);
             const bool strings = o.contains("strings") && o.at("strings").is_array() && !o.at("strings").empty();
-            pixels.push_back({t.key, slice, strings ? int(o.at("strings").size()) : derived.pixels_x, derived.pixels_y,
-                              strings});
+            pixels.push_back(
+                {t.key, slice, strings ? int(o.at("strings").size()) : derived.pixels_x, derived.pixels_y, strings});
         } else if (o.value("pixelSource", std::string("dmx")) == "slice") {
             pixels.push_back({t.key, slice, std::max(1, o.value("pixels", 1)), std::max(1, o.value("rows", 1))});
         } else if (o.value("patch", json()).is_object()) {
@@ -2486,7 +2628,7 @@ void Session::update_ddp() {
 
 void Session::push_pixel_inputs() {
     pixel_output_.set({snapshot_, composition_, feed_sources(), playback_feed_sources(), playback_opacity(),
-                       pixel_targets_, 44});
+                       pixel_targets_, mapping_probes_, 44});
 }
 
 void Session::checkForUpdates() { sv::updater::check_now(); }

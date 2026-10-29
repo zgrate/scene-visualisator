@@ -30,7 +30,8 @@ python3 tools/dmx_send.py --proto sacn --universes 1-4 --pattern chase   # test 
 - **Windows cross build:** `win-mingw` is a local cross-compile preset. It needs `QT_ROOT_DIR` set to Qt's `mingw_64`
   and `QT_HOST_PATH` set to `gcc_64`.
 - **Golden render:** `render_golden` (ctest, under `xvfb-run`) renders the demo rig at 640×360 and compares it with
-  `tests/golden/demo.png`. After an intended visual change, regenerate with
+  `tests/golden/demo.png`; `render_golden_cinematic` does the same for the offline render's look
+  (`demo-cinematic.png`). After an intended visual change, regenerate with
   `SV_UPDATE_GOLDEN=1 ctest --preset linux-debug -R render_golden` and look at the PNG before committing it.
 - **Demo DMX:** `--generator rainbow|chase|sweep|full` runs an internal pattern, so screenshots show beams.
 - **No GPU here:** this machine renders with Mesa llvmpipe. Frame-rate numbers from it are trends, never targets.
@@ -171,7 +172,8 @@ Hard rules:
 ## 9. Deferred (Release, do not build in Beta)
 - **Media:** Spout, Syphon and NDI *output* of the 3D view (optional milestone B8, only on request), MVR-xchange.
   NDI out of the Resolume feeds is done (section 28); Spout and Syphon output are not.
-- **Rendering:** shadows and emissive wall lighting, Bezier warp preview.
+- **Rendering:** shadows, emissive wall lighting in the live viewport (the offline render's cinematic look has it),
+  Bezier warp preview.
 - **Other:** the GDTF Share browser, render export and headless render node.
 
 ## 10. Core API in brief (M1)
@@ -196,7 +198,14 @@ Hard rules:
   `status()` for data, rate, loss and sources.
 - **Internal sources:** `set_internal_frame()` handles paste-a-frame and the fader page. `set_generator()` runs at 44 Hz.
   Generator targets map GDTF attribute names (`Dimmer`, `Pan`, `Tilt`, `ColorAdd_R/G/B/W`, `Color1`) to footprint
-  offsets.
+  offsets. `pattern_names` is the one name table (CLI `--generator`, MCP `set_generator`, `Session.setGenerator`,
+  the MEDIA card's DMX GENERATOR combo). Pattern `mapping` makes the rig follow the screens: `mapping_probes()`
+  (`scene_builder.cpp`) gives each target the composition point under the closest point of the nearest LED wall or
+  LED string (through the string's slice column),
+  `PixelOutput` samples it with `sample_slice` and pushes `set_generator_colours()`, the engine's tick runs
+  `smooth_colours` (`GeneratorOptions`: preferences `generatorSmoothMs` 150 and `generatorMax` 1, MCP `set_generator`
+  `smoothMs`/`max`, the MEDIA card's Smooth/Max fields) and the generator writes dimmer (max), RGB, W (min) and CMY
+  from it.
 - **Packets and merge:** `protocol/packets.h` builds and parses packets, also for tests. `protocol/merger.h` holds the
   merge rule.
 - **We wrote our own sACN receiver, not the ETCLabs library.** This is the spec's named fallback: one socket model and
@@ -229,8 +238,22 @@ Hard rules:
   beams, walls, floor spots, pick boxes). `SceneRenderer` draws that list. It knows nothing about JSON or GDTF.
 - **`SceneRenderer`:** call `initialize(rhi, rt)` every frame (cheap) and then `render(cb, rt)`. `set_scene`,
   `set_composition(QImage)` and `set_camera(OrbitCamera, time)` only store their input. Uploads happen in `render`.
-- **Passes, in order:** grid → boxes → LED walls → beams. Beams are drawn with screen blending (output clamped to 1),
-  back faces only, without depth writes. Their look is analytic: the closest approach of the view ray to the beam axis.
+- **Passes, in order:** grid → boxes → LED walls → beams. Beams are drawn back faces only, without depth writes.
+  Their look is analytic: the closest approach of the view ray to the beam axis.
+- **Render quality:** preference `renderQuality`. `high` (default) draws the passes into a 4× MSAA RGBA16F target,
+  with beams blended additively. Six dual-filter bloom mips follow (`bloom_down`/`bloom_up`, Karis average on the
+  first pass), then `composite.frag` writes into the item's target. That composite rolls off highlights only above
+  0.8, so Theme colours stay as they are, and adds a vignette and dither. Shaders branch on `light.w` (1 in HDR): beam
+  lens heat and drifting smoke noise, wall gain, mesh specular and a higher pool limit. `fast` is the old path, with
+  a screen blend clamped to 1 and the item at 4× MSAA. It is also the fallback without RGBA16F. The HUD shows `hdr`.
+- **Cinematic (offline render only):** `SceneRenderer::cinematic` (implies HDR) sets `light.w` to 2; the branches
+  test `light.w > 1.5`, so the viewport's looks never change. `rig_lights()` fills the `Lights` UBO (binding 2,
+  `shaders/lights.glsl`, shared through `GL_GOOGLE_include_directive`): the 48 brightest beams as spots that stop at
+  their hit, up to 64 LED wall cells as area lights (colour from a 160×90 downscale of the composition), and 16 wall
+  quads. `rig_light()` lights meshes, the floor and black LED faces (Lambert plus GGX, ambient 0.035); the floor adds
+  a soft, distance-blurred reflection of the walls through the composition's mips (`textureLod`), beams march 24 steps
+  with a Henyey-Greenstein phase and a lens glow, and the composite tone maps with ACES plus a haze veil and a light
+  chromatic fringe. The composition texture has mips only in cinematic.
 - **Beams:** each ends at the first deck, shape, LED wall or set piece, the floor or `venue.height`; only floor and
   downward hits make pools, which sum through a soft limit in `grid.frag`. Colour scales by √(flux / 10000 lm),
   clamped 0.25–1. `BeamInstance.owner` is the fixture's index in `objects`.
@@ -475,6 +498,8 @@ Hard rules:
   - `get_drawing {kind}` and `set_drawing {kind, key, value}` read and edit a sheet (section 20) as one `AI: ` undo
     step; `export_drawing {kind, path}` writes PDF or SVG and is gated by files access.
   - `get_beams` (debug) gives the built beams with `BeamInstance::hit`.
+  - `get_render {preview}` gives the offline render's progress (`recording.render`, section 26); `preview: true`
+    adds the last rendered frame as a PNG.
   - `get_render_stats {fresh}` (debug) waits on the server thread, never the UI thread, for `serial` to advance
     by 2.
 - **Debug mode:** `--debug` (this run) or the Project screen toggle (preference `debug`). It enables `sv.*.debug`, the
@@ -519,7 +544,37 @@ Hard rules:
 - **Recording:** `DmxEngine::set_tap` is called on the network thread with every published universe; the Session's
   tap writes under a mutex and is seeded with the current state at t = 0. `MediaSource::start_recording` feeds
   frames through `QVideoFrameInput` into a `QMediaRecorder` (H.264, or what the FFmpeg build offers;
-  near-lossless = 150 Mbit/s CBR, preference `recordLossless`).
+  near-lossless = 150 Mbit/s CBR, preference `recordLossless`). The encoder is `media/frame_recorder.h`
+  (`FrameRecorder`, UI thread).
+- **View recording:** `startRecording(url, lossless, view)` (preference `recordView`, MCP `record.view`) also writes
+  `<base>.view.mp4`. This is the post-processed viewport. `ViewportRenderer::read_back` reads back `colorTexture()`
+  with one readback in flight, crops to even dimensions and posts the frame to `Session::push_view_frame`. The tick
+  redraws every frame while it records. Frames come only while the viewport is shown, at its pixel size.
+- **Offline render (`app/offline_render.h`):** `startRender({path, fps, start, duration, width, height, lossless,
+  camera})` steps show time one output frame at a time, so a slow GPU still writes a smooth mp4. Per frame it steps each video sequentially (`MediaSource::begin_stepping`/`shows`: one seek, a 16-frame queue, the player
+  paused when full) and seeks the take's DMX with `playback_send(t)`, moves the camera along `camera_at(keys, t)` (fields a key leaves out come from the 3D
+  view's camera), waits for each video's `frame_span()` to cover t and for a DMX publish (3 s timeout), then draws at
+  scene time t on its own offscreen QRhi (D3D11, Metal or GL; no selection, DMX from `status()` because the
+  TripleBuffers belong to the viewport) and `FrameRecorder::push(image, us)` encodes it stamped t, never dropping. It
+  never uses the window, so it runs while the app is minimised or the PC is locked; the viewport's 16 ms tick stays
+  idle meanwhile. The GPU work (`OfflineRender::View`: QRhi, scene build, draw, readback) runs on a worker thread
+  with inputs gathered on the UI thread (`FrameInputs`: snapshots, DMX copy, composition image), so the window keeps
+  repainting; the frame loop, the video stepping and the encoder stay on the UI thread, one frame in flight. Duration defaults to the take or video length. No audio: mux it with
+  `ffmpeg -i render.mp4 -ss <start> -i source.mp4 -map 0:v -map 1:a -c copy -shortest out.mp4`. Status is
+  `recording.render {active, frame, frames, path, error, elapsedMs, rate, etaMs, queue, videoGaps, stages, width, height, fps,
+  quality, samples, backend, device, encoder, previewSerial}`; `stages` holds ms per frame over the last 20
+  (`waitVideo, waitDmx, waitEncoder, build, draw, readback, push, other`; `other` is the rest of the frame interval:
+  UI work and timers; `uiMs` is one status tick's binding cost), `encoder` comes from Qt's FFmpeg debug log. While a
+  render runs the 20 Hz status tick emits `dmxChanged()` at 4 Hz, and the status maps (`recording`, `dmxStatus`, `mediaStatus`, `outputStatus`, `aiStatus`, `feedStatus`) are built
+  once per `dmxChanged()` emit (`notify_dmx`)
+  (`Session::encoder_log_rule`), and `image://render/<previewSerial>` is the last frame at 480 px. `RenderScreen.qml`
+  opens itself on a render and shows all of it; RecordCard's RENDER row and MCP `render_video` start it.
+  `quality` is `cinematic` (default, section 13) or `high` (the viewport's look). Cinematic draws at 2× (up to 4K out)
+  and scales down; `samples` (default 4 in cinematic, else 1, up to 64) averages sub-frames over a 180° shutter for
+  motion blur, with the inputs held at t; `supersample` (default true) is the 2× draw, and false is ~4× faster with
+  softer edges (RecordCard presets: Cinematic 2×, Cinematic 1×, Draft 1× 2 samples, Viewport look; preference
+  `renderPreset`). `FrameAccumulator` (`render/frame_accumulator.h`) sums and scales the
+  sub-frames down on the GPU (RGBA16F, one bilinear tap per output pixel): one output-sized readback per frame.
 - **Playback:** `DmxEngine::set_playback(u, PlaybackMix)` mixes the recording into the merged live result per slot
   (section 28; status source "Playback"). A 44 Hz timer follows the video position, or its
   own clock without video, and loops. `setPlaybackChase(on, "HH:MM:SS[:FF]")` makes it chase Art-Net timecode
@@ -532,7 +587,7 @@ Hard rules:
 - **Session:** `recording` map, `startRecording(url, lossless)`, `stopRecording`, `startPlayback(url)`,
   `stopPlayback`, `pausePlayback`, `seekPlayback(ms)`, `setPlaybackScope`, `setPlaybackFade` (`setPlaybackReplace(r)` is the old name for
   the default scope). Opening or creating a project stops
-  both. UI: the dock's REC button opens `RecordCard.qml`. MCP: `get_recording`, and file-gated `record` and `play`.
+  both. UI: the dock's REC button opens `RecordCard.qml`. MCP: `get_recording`, and file-gated `record`, `play` and `render_video`.
 
 ## 27. Light control (programmer)
 - **Engine:** `DmxEngine::set_programmer(u, {slots, mask})` overrides only the masked slots, after the merge and

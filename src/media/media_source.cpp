@@ -5,10 +5,11 @@
 
 #include <QDateTime>
 #include <QGuiApplication>
-#include <QMediaFormat>
 #include <QScreen>
 #include <QUrl>
 #include <QVideoFrame>
+
+#include <cmath>
 
 namespace sv::media {
 
@@ -21,6 +22,10 @@ MediaSource::MediaSource(QObject *parent) : QObject(parent) {
     connect(&capture_sink_, &QVideoSink::videoFrameChanged, this, &MediaSource::on_frame);
     connect(&player_, &QMediaPlayer::errorOccurred, this,
             [this](QMediaPlayer::Error, const QString &e) { error_ = e; });
+    connect(&player_, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus st) {
+        if (st == QMediaPlayer::EndOfMedia)
+            ended_ = true;
+    });
     connect(&screen_, &QScreenCapture::errorOccurred, this,
             [this](QScreenCapture::Error, const QString &e) { error_ = e; });
     connect(&window_, &QWindowCapture::errorOccurred, this,
@@ -43,8 +48,10 @@ void MediaSource::open(const QString &kind, const QString &target) {
         fps_ = 0;
         last_ms_ = 0;
         latency_ms_ = 0;
+        frame_start_ = frame_end_ = -1;
     }
     kind_.clear();
+    stepping_ = false, queue_.clear();
     if (kind == "video" && !target.isEmpty()) {
         player_.setSource(QUrl::fromLocalFile(target));
         player_.play();
@@ -81,15 +88,78 @@ void MediaSource::open(const QString &kind, const QString &target) {
 }
 
 void MediaSource::set_playback(bool playing, bool loop, double rate) {
+    stepping_ = false, queue_.clear();
     player_.setLoops(loop ? QMediaPlayer::Infinite : 1);
     player_.setPlaybackRate(rate > 0 ? rate : 1.0);
     if (kind_ == "video")
         playing ? player_.play() : player_.pause();
 }
 
+void MediaSource::begin_stepping(qint64 from_ms) {
+    queue_.clear();
+    gaps_ = 0, ended_ = false, shown_start_ = -2, stepping_ = true;
+    seeked_ = false, seek_ms_ = double(from_ms), seek_clock_.start();
+    player_.setLoops(1);
+    player_.setPlaybackRate(2.0); // decodes ahead of the render; the queue bound stops it running away
+    player_.setPosition(from_ms);
+    player_.play();
+}
+
+void MediaSource::end_stepping() {
+    stepping_ = false;
+    queue_.clear();
+    player_.setPlaybackRate(1.0);
+}
+
+bool MediaSource::shows(double t) {
+    if (!stepping_) {
+        const auto [from, to] = frame_span();
+        return from >= 0 && from <= t + 1 && (to > t || to <= from); // the frame on screen at t
+    }
+    while (queue_.size() > 1 && queue_[1].start_ms <= t + 1) // older frames are done with
+        queue_.pop_front();
+    if (queue_.empty()) {
+        if (!seeked_ && seek_clock_.elapsed() > 1000) // a seek sent before the media was ready is dropped
+            player_.setPosition(qint64(seek_ms_)), seek_clock_.restart();
+        return ended_; // past the end: hold the last frame
+    }
+    const Queued &q = queue_.front();
+    if (queue_.size() < 6 && player_.playbackState() == QMediaPlayer::PausedState)
+        player_.play();
+    if (q.end_ms > q.start_ms && q.end_ms <= t && !ended_)
+        return false; // the head is stale and the next frame has not arrived yet
+    // Nothing covers t yet and the decoder has nothing earlier: a skipped frame. Use the head rather than stall.
+    if (q.start_ms > t + 1 && !ended_ && shown_start_ >= 0 && q.start_ms > shown_start_ + 1 + 1000.0 / 30)
+        ++gaps_;
+    if (q.start_ms != shown_start_) {
+        {
+            QMutexLocker lock(&mutex_);
+            frame_start_ = q.start_ms, frame_end_ = q.end_ms;
+        }
+        store(q.image);
+        shown_start_ = q.start_ms;
+    }
+    return true;
+}
+
 void MediaSource::on_frame(const QVideoFrame &frame) {
     if (!frame.isValid() || kind_.isEmpty())
         return;
+    if (stepping_) { // converted now, so the decoder's surface pool is never held by the queue
+        // Frames decoded before the seek took effect still arrive, with their old times: a frame ahead of the
+        // target would be shown and hold until t reached it. Wait for one within a second of the target.
+        if (!seeked_ && !(seeked_ = std::abs(double(frame.startTime()) / 1000 - seek_ms_) <= 1000))
+            return;
+        queue_.push_back({double(frame.startTime()) / 1000, double(frame.endTime()) / 1000, frame.toImage()});
+        if (queue_.size() >= 16)
+            player_.pause();
+        return;
+    }
+    {
+        QMutexLocker lock(&mutex_);
+        frame_start_ = double(frame.startTime()) / 1000;
+        frame_end_ = double(frame.endTime()) / 1000;
+    }
     store(frame.toImage()); // shortcut: CPU copy per frame; share GPU textures if NFR-3 latency fails on hardware
 }
 
@@ -109,47 +179,18 @@ void MediaSource::store(QImage image) {
 
 QString MediaSource::start_recording(const QString &path, bool lossless) {
     stop_recording();
-    rec_session_ = std::make_unique<QMediaCaptureSession>();
-    rec_input_ = std::make_unique<QVideoFrameInput>();
-    recorder_ = std::make_unique<QMediaRecorder>();
-    QMediaFormat format(QMediaFormat::MPEG4);
-    format.setVideoCodec(QMediaFormat::VideoCodec::H264);
-    recorder_->setMediaFormat(format);
-    recorder_->setOutputLocation(QUrl::fromLocalFile(path));
-    if (lossless) {
-        recorder_->setQuality(QMediaRecorder::VeryHighQuality);
-        recorder_->setEncodingMode(QMediaRecorder::ConstantBitRateEncoding);
-        recorder_->setVideoBitRate(150'000'000);
-    } else {
-        recorder_->setQuality(QMediaRecorder::HighQuality);
-    }
-    connect(recorder_.get(), &QMediaRecorder::errorOccurred, this,
-            [this](QMediaRecorder::Error, const QString &e) { error_ = tr("Recording: %1").arg(e); });
-    rec_session_->setVideoFrameInput(rec_input_.get());
-    rec_session_->setRecorder(recorder_.get());
-    recorder_->record();
-    rec_clock_.start();
+    const QString error =
+        recorder_.start(path, lossless, [this](const QString &e) { error_ = tr("Recording: %1").arg(e); });
     recording_ = true;
-    return recorder_->error() == QMediaRecorder::NoError ? QString() : recorder_->errorString();
+    return error;
 }
 
 void MediaSource::stop_recording() {
     recording_ = false;
-    if (!recorder_)
-        return;
-    recorder_->stop(); // finalises the file
-    recorder_.reset();
-    rec_input_.reset();
-    rec_session_.reset();
+    recorder_.stop();
 }
 
-void MediaSource::record_frame(const QImage &image) {
-    if (!recorder_ || image.isNull())
-        return;
-    QVideoFrame frame(image);
-    frame.setStartTime(rec_clock_.nsecsElapsed() / 1000);
-    rec_input_->sendVideoFrame(frame); // false while the encoder is busy: the frame is dropped, timestamps keep sync
-}
+void MediaSource::record_frame(const QImage &image) { recorder_.push(image); }
 
 quint64 MediaSource::serial() const {
     QMutexLocker lock(&mutex_);
@@ -166,6 +207,11 @@ QImage MediaSource::latest(quint64 &serial) const {
         latency_ms_ = latency_ms_ ? latency_ms_ * 0.9 + age * 0.1 : age;
     }
     return image_;
+}
+
+std::pair<double, double> MediaSource::frame_span() const {
+    QMutexLocker lock(&mutex_);
+    return {frame_start_, frame_end_};
 }
 
 MediaStatus MediaSource::status() const {

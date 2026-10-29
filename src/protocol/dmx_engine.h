@@ -25,9 +25,9 @@ struct EngineConfig {
 // Signal output (proxy): what the engine publishes goes out again, at `universe + universe_offset`.
 struct OutputConfig {
     bool enabled = false;
-    bool sacn = false;          // false = Art-Net
-    std::string target;         // unicast IPv4; empty = Art-Net broadcast 255.255.255.255 or sACN multicast
-    std::uint16_t port = 0;     // 0 = the protocol's port (tests use their own)
+    bool sacn = false;      // false = Art-Net
+    std::string target;     // unicast IPv4; empty = Art-Net broadcast 255.255.255.255 or sACN multicast
+    std::uint16_t port = 0; // 0 = the protocol's port (tests use their own)
     int universe_offset = 0;
     std::uint8_t priority = 100; // sACN
     double rate_hz = 44;         // changed universes per second; unchanged ones are refreshed once a second
@@ -66,11 +66,11 @@ struct UniverseFrame {
 struct UniverseStatus {
     std::uint16_t universe = 0;
     Slots data{};
-    double rate_hz = 0;        // merged frames per second over the last second
-    std::uint64_t lost = 0;    // sequence gaps since subscribe
-    std::uint64_t dropped = 0; // out-of-order packets discarded
-    std::vector<std::string> sources;    // display names
-    std::vector<std::string> source_ids; // same order: "artnet:<ip>", "sacn:<cid>", "internal:..."
+    double rate_hz = 0;                     // merged frames per second over the last second
+    std::uint64_t lost = 0;                 // sequence gaps since subscribe
+    std::uint64_t dropped = 0;              // out-of-order packets discarded
+    std::vector<std::string> sources;       // display names
+    std::vector<std::string> source_ids;    // same order: "artnet:<ip>", "sacn:<cid>", "internal:..."
     std::array<std::uint8_t, 512> winner{}; // index into sources, UniverseMerger::no_winner if none
     MergePolicy policy = MergePolicy::priority;
 };
@@ -99,6 +99,8 @@ class DmxEngine {
     void set_intensity_mask(std::uint16_t universe, std::bitset<512> mask);
     void set_internal_frame(std::uint16_t universe, std::optional<Slots> frame); // paste-a-frame / fader page
     void set_generator(Pattern pattern, double speed, std::vector<GeneratorTarget> targets);
+    void set_generator_colours(std::vector<Rgb> colours); // any thread, latest wins; Pattern::mapping, per target
+    void set_generator_options(GeneratorOptions options); // the mapping transition and ceiling
     // Show playback, mixed per slot with the live merge (see PlaybackMix). nullopt clears it.
     void set_playback(std::uint16_t universe, std::optional<PlaybackMix> mix);
     // Light control: slots set in the mask override whatever the merge or playback gives. nullopt clears it.
@@ -112,7 +114,7 @@ class DmxEngine {
     void set_ddp(std::vector<DdpTarget> targets);
     void set_ddp_pixels(const std::string &key, std::vector<std::uint8_t> pixels); // any thread, latest wins
 
-    Timecode timecode() const; // any thread
+    Timecode timecode() const;            // any thread
     std::uint64_t publish_serial() const; // any thread; advances with every universe the merge publishes
 
     // Render thread: one consumer per universe; the pointer stays valid for the engine's lifetime.

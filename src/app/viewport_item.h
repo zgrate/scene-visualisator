@@ -11,8 +11,8 @@
 #include <QVector3D>
 #include <atomic>
 #include <optional>
-#include <set>
 #include <qqmlintegration.h>
+#include <set>
 #include <string>
 
 // The 3D view. A QQuickRhiItem so the scene renders on Qt Quick's render thread through QRhi.
@@ -23,12 +23,12 @@
 class ViewportItem : public QQuickRhiItem {
     Q_OBJECT
     QML_ELEMENT
-    Q_PROPERTY(QString view READ view NOTIFY viewChanged) // "Perspective", "Top", ...
+    Q_PROPERTY(QString view READ view NOTIFY viewChanged)                                   // "Perspective", "Top", ...
     Q_PROPERTY(QString gizmoMode READ gizmoMode WRITE setGizmoMode NOTIFY gizmoModeChanged) // all|move|rotate|scale
     Q_PROPERTY(QString tool READ tool WRITE setTool NOTIFY toolChanged)                     // select|floor
-    Q_PROPERTY(bool keys MEMBER keys_)                                       // off while another screen covers it
+    Q_PROPERTY(bool keys MEMBER keys_) // off while another screen covers it
     Q_PROPERTY(QString transformHint READ transformHint NOTIFY transformHintChanged) // "Move X: 1.25 m"
-    Q_PROPERTY(QString flying READ flying NOTIFY flyingChanged) // "", "hold" or "walk"
+    Q_PROPERTY(QString flying READ flying NOTIFY flyingChanged)                      // "", "hold" or "walk"
 
   public:
     explicit ViewportItem(QQuickItem *parent = nullptr);
@@ -41,12 +41,13 @@ class ViewportItem : public QQuickRhiItem {
     QString transformHint() const { return hint_; }
     QString flying() const { return fly_ == Fly::hold ? "hold" : fly_ == Fly::walk ? "walk" : ""; }
     std::string gizmo_entry() const; // the selection pseudo-entry the renderer passes to build_scene, or empty
+    static bool hdr();               // preference renderQuality: "high" (default: HDR, bloom, haze) or "fast"
 
     Q_INVOKABLE void setPreset(const QString &name); // Perspective, Top, Front, Side, Back, Other side, Bottom
     Q_INVOKABLE QVariantMap cameraState() const;     // for bookmarks in the project layout
     Q_INVOKABLE void setCameraState(const QVariantMap &state);
-    Q_INVOKABLE void frameSelection(bool all = false); // the selection, or the whole rig (all, or nothing selected)
-    Q_INVOKABLE QVariantList keyHelp() const;          // {group, keys, label} rows for the keyboard card
+    Q_INVOKABLE void frameSelection(bool all = false);    // the selection, or the whole rig (all, or nothing selected)
+    Q_INVOKABLE QVariantList keyHelp() const;             // {group, keys, label} rows for the keyboard card
     Q_INVOKABLE bool beginTransform(const QString &kind); // modal "move", "rotate" or "scale" of the selection
     Q_INVOKABLE QVariantList floorPoint(qreal x, qreal y) const; // [x, 0, z] snapped to 0.25 m, [] off the floor
 
@@ -91,8 +92,8 @@ class ViewportItem : public QQuickRhiItem {
     QTimer tick;
     std::vector<quint64> drawn_; // what the last redraw saw (DMX, media, document); see the tick
     Fly fly_ = Fly::none;
-    std::set<int> held_;              // keys down while flying
-    float fly_speed_ = 4;             // m/s, the wheel scales it while flying
+    std::set<int> held_;                // keys down while flying
+    float fly_speed_ = 4;               // m/s, the wheel scales it while flying
     sv::render::OrbitCamera fly_start_; // restored when walk is cancelled
     QElapsedTimer fly_clock_;
     QPointF last, press;

@@ -22,8 +22,21 @@ std::array<double, 3> hsv(double h, double s, double v) {
 
 } // namespace
 
+void smooth_colours(std::vector<std::array<double, 3>> &state, const std::vector<Rgb> &target, double dt_ms,
+                    const GeneratorOptions &options, std::vector<Rgb> &out) {
+    state.resize(target.size());
+    out.resize(target.size());
+    const double k = options.smooth_ms > 0 ? dt_ms / (options.smooth_ms + dt_ms) : 1.0;
+    const double ceiling = 255.0 * std::clamp(options.max, 0.0, 1.0);
+    for (std::size_t n = 0; n < target.size(); ++n)
+        for (int c = 0; c < 3; ++c) {
+            state[n][c] += (double(target[n][c]) - state[n][c]) * k;
+            out[n][c] = std::uint8_t(std::lround(std::min(state[n][c], ceiling)));
+        }
+}
+
 void run_generator(Pattern pattern, double t, double speed, const std::vector<GeneratorTarget> &targets,
-                   std::map<std::uint16_t, Slots> &frames) {
+                   std::map<std::uint16_t, Slots> &frames, std::span<const Rgb> colours) {
     if (pattern == Pattern::off)
         return;
     const auto n_fixtures = std::max<std::size_t>(targets.size(), 1);
@@ -40,7 +53,11 @@ void run_generator(Pattern pattern, double t, double speed, const std::vector<Ge
                 put(it->second, v);
         };
         const double ph = t * speed + double(n) * 0.5, hue = std::fmod(ph * 40, 360);
-        const auto [r, g, b] = hsv(hue, 1, 1);
+        auto [r, g, b] = hsv(hue, 1, 1);
+        if (pattern == Pattern::mapping) {
+            const Rgb c = n < colours.size() ? colours[n] : Rgb{};
+            r = c[0], g = c[1], b = c[2];
+        }
         switch (pattern) {
         case Pattern::full:
             for (auto a : {"Dimmer", "ColorAdd_R", "ColorAdd_G", "ColorAdd_B", "ColorAdd_W"})
@@ -64,11 +81,18 @@ void run_generator(Pattern pattern, double t, double speed, const std::vector<Ge
             set("Pan", 128 + 110 * std::sin(ph * 0.8)), set("Tilt", 128 + 90 * std::sin(ph * 0.5));
             set("Color1", 0);
             break;
+        case Pattern::mapping:
+            set("Dimmer", std::max({r, g, b}));
+            set("ColorAdd_R", r), set("ColorAdd_G", g), set("ColorAdd_B", b), set("ColorAdd_W", std::min({r, g, b}));
+            set("ColorSub_C", 255 - r), set("ColorSub_M", 255 - g), set("ColorSub_Y", 255 - b);
+            set("Pan", 128), set("Tilt", 128);
+            break;
         case Pattern::off:
             break;
         }
         for (std::size_t i = 0; i < f.cells.size(); ++i) {
-            const auto [cr, cg, cb] = hsv(std::fmod(hue + double(i) * 30, 360), 1, 1);
+            const auto [cr, cg, cb] =
+                pattern == Pattern::mapping ? std::array{r, g, b} : hsv(std::fmod(hue + double(i) * 30, 360), 1, 1);
             put(f.cells[i].r, cr), put(f.cells[i].g, cg), put(f.cells[i].b, cb);
         }
     }

@@ -1,5 +1,5 @@
 # Live composition sources (FR-13, FR-14). Qt Gui + Multimedia, never Quick/QML.
-add_library(sv_media STATIC media_source.cpp media_source.h ndi.cpp ndi.h native_receiver.h)
+add_library(sv_media STATIC frame_recorder.cpp frame_recorder.h media_source.cpp media_source.h ndi.cpp ndi.h native_receiver.h)
 target_include_directories(sv_media PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # NDI headers only (MIT); the runtime is loaded at run time, never linked.
 target_include_directories(sv_media SYSTEM PUBLIC ${PROJECT_SOURCE_DIR}/third_party/ndi)

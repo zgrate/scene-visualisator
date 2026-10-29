@@ -41,6 +41,9 @@ ApplicationWindow {
     property bool build: false // Build palette card on the design screen
     property bool view3d: true // title-bar 3D switch; per session, so a restart never opens on a paused view
     property bool keysCard: false // the keyboard card, toggled by ? or F1
+    property bool renderScreen: false // the render progress screen; opens itself when a render starts
+    readonly property bool rendering: !!(Session.recording.render || {}).active
+    onRenderingChanged: if (rendering) renderScreen = true
     property int dockUniverse: Session.universes.length ? Session.universes[0] : 1
 
     function rate(v) { return v < 0 ? "—" : Math.round(v) + " Hz" }
@@ -224,6 +227,7 @@ ApplicationWindow {
                       : st.signal ? " · %1×%2 · %3 fps".arg(st.width).arg(st.height).arg(st.fps.toFixed(1))
                       : " · " + qsTr("No signal"))
                       + (fed.length ? " · " + qsTr("%1/%2 outputs").arg(fedLive).arg(fed.length) : "")
+                      + (Session.generator !== "off" ? " · " + qsTr("GEN %1").arg(Session.generator) : "")
                 palette.buttonText: (st.live && !st.signal) || fedLive < fed.length ? Theme.warn : Theme.muted
                 onClicked: media.open()
                 MediaCard { id: media; y: -height - 10; x: parent.width - width }
@@ -240,7 +244,7 @@ ApplicationWindow {
                       : qsTr("REC")
                 palette.buttonText: rec.active ? Theme.err : rec.playing ? Theme.accent : Theme.muted
                 onClicked: recordCard.open()
-                RecordCard { id: recordCard; y: -height - 10; x: parent.width - width }
+                RecordCard { id: recordCard; y: -height - 10; x: parent.width - width; onProgress: win.renderScreen = true }
             }
         }
     }
@@ -520,6 +524,12 @@ ApplicationWindow {
         PlanScreen {
             visible: win.screen === "plan"
             anchors.fill: parent
+        }
+
+        RenderScreen {
+            visible: win.renderScreen
+            anchors.fill: parent
+            onClosed: win.renderScreen = false
         }
     }
 

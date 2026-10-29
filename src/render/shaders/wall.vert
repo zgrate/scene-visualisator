@@ -12,10 +12,12 @@ layout(location = 0) out vec2 v_uv;
 layout(location = 1) flat out vec4 v_slice;
 layout(location = 2) flat out vec4 v_grid;
 layout(location = 3) flat out vec4 v_params;
+layout(location = 4) out vec3 v_world;
+layout(location = 5) flat out vec3 v_normal;
 layout(std140, binding = 0) uniform Frame {
     mat4 view_proj;
     vec4 eye;        // w: time in seconds
-    vec4 light;      // xyz: direction toward the light
+    vec4 light;      // xyz: direction toward the light, w: 1 when drawing into the HDR target
     vec4 floor_info; // venue half width, half depth, haze, floor spot count
     vec4 venue;
     vec4 spot_pos[32]; // x, z centre, radius
@@ -26,5 +28,8 @@ void main() {
     v_slice = slice;
     v_grid = grid;
     v_params = params;
-    gl_Position = view_proj * (mat4(m0, m1, m2, m3) * vec4(position, 1.0));
+    vec4 world = mat4(m0, m1, m2, m3) * vec4(position, 1.0);
+    v_world = world.xyz;
+    v_normal = cross(m0.xyz, m1.xyz); // from the edges: walls may have no depth scale
+    gl_Position = view_proj * world;
 }

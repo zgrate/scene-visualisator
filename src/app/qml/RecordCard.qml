@@ -10,6 +10,7 @@ import QtQuick.Layouts
 // its own fader under the master.
 Popup {
     id: card
+    signal progress() // open the render progress screen
     width: 340
     padding: 12
     readonly property var rec: Session.recording
@@ -41,7 +42,19 @@ Popup {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "svdmx"
         nameFilters: [qsTr("Show recordings (*.svdmx)")]
-        onAccepted: card.error = Session.startRecording(selectedFile, quality.currentIndex === 1)
+        onAccepted: card.error = Session.startRecording(selectedFile, quality.currentIndex === 1, viewCheck.checked)
+    }
+    FileDialog {
+        id: renderDialog
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "mp4"
+        nameFilters: [qsTr("Video (*.mp4)")]
+        onAccepted: {
+            const p = renderPreset.presets[renderPreset.currentIndex]
+            card.error = Session.startRender({ path: selectedFile, fps: Number(renderFps.text) || 30,
+                                               lossless: quality.currentIndex === 1,
+                                               quality: p[0], supersample: p[1], samples: p[2] })
+        }
     }
     FileDialog {
         id: playDialog
@@ -67,6 +80,12 @@ Popup {
                 model: [qsTr("Compressed · ~2 GB/h"), qsTr("Near-lossless · ~60 GB/h")]
                 currentIndex: String(Session.preference("recordLossless", false)) === "true" ? 1 : 0
             }
+        }
+        Check {
+            id: viewCheck
+            text: qsTr("Also record the 3D view (.view.mp4)")
+            enabled: !card.rec.active
+            checked: String(Session.preference("recordView", false)) === "true"
         }
         RowLayout {
             spacing: 8
@@ -281,11 +300,66 @@ Popup {
                 }
             }
         }
+        // Offline render: the take or the composition video, frame by frame from the current camera, at 1920×1080
         Label {
-            visible: card.error !== "" || card.rec.error !== ""
+            text: qsTr("RENDER")
+            color: Theme.muted
+            font.pixelSize: 8
+            font.letterSpacing: 1.2
+        }
+        RowLayout {
+            spacing: 8
+            readonly property var job: card.rec.render || {}
+            Input {
+                id: renderFps
+                Layout.preferredWidth: 40
+                enabled: !parent.job.active
+                text: "30"
+                font.family: Theme.mono
+                validator: IntValidator { bottom: 1; top: 240 }
+            }
+            Label { text: qsTr("fps"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
+            ComboBox {
+                id: renderPreset
+                Layout.preferredWidth: 150
+                enabled: !parent.job.active
+                // quality, supersample, samples (0 = the quality's default)
+                readonly property var presets: [["cinematic", true, 0], ["cinematic", false, 0],
+                                                ["cinematic", false, 2], ["high", true, 1]]
+                model: [qsTr("Cinematic · 2× · 4 samples"), qsTr("Cinematic · 1× · 4 samples"),
+                        qsTr("Draft · 1× · 2 samples"), qsTr("Viewport look")]
+                currentIndex: Math.min(3, Math.max(0, Number(Session.preference("renderPreset", 0))))
+                onActivated: i => Session.setPreference("renderPreset", i)
+            }
+            Button {
+                text: parent.job.active ? qsTr("Stop") : qsTr("Render…")
+                enabled: parent.job.active || !card.rec.active
+                palette.buttonText: parent.job.active ? Theme.err : Theme.fg
+                onClicked: {
+                    card.error = ""
+                    if (parent.job.active) Session.stopRender()
+                    else renderDialog.open()
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: parent.job.frames > 0
+                text: qsTr("frame %1 / %2").arg(parent.job.frame).arg(parent.job.frames)
+                color: parent.job.active ? Theme.accent : Theme.muted
+                font.family: Theme.mono
+                font.pixelSize: Theme.small + 1
+            }
+            Button {
+                visible: parent.job.frames > 0
+                text: qsTr("Progress")
+                onClicked: { card.close(); card.progress() }
+            }
+        }
+        Label {
+            visible: card.error !== "" || card.rec.error !== "" || !!(card.rec.render || {}).error
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: card.error !== "" ? card.error : card.rec.error
+            text: card.error !== "" ? card.error : card.rec.error || (card.rec.render || {}).error
             color: Theme.err
             font.pixelSize: Theme.small + 1
         }

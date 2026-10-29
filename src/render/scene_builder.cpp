@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 namespace sv::render {
@@ -668,13 +669,102 @@ RenderScene build_scene(const json &project, const std::map<std::string, Fixture
     return std::move(b.scene);
 }
 
+namespace {
+// The fixtures the generators drive: patched, with a known type.
+bool generator_fixture(const json &o, const FixtureLibrary &library) {
+    return o.value("type", std::string()) == "fixture" && o.value("patch", json()).is_object() &&
+           library.contains(o.value("gdtf", std::string()));
+}
+} // namespace
+
+std::vector<json> mapping_probes(const json &project, const FixtureLibrary &library) {
+    struct Wall {
+        QMatrix4x4 inverse, world;
+        float width, height;
+        json slice;
+    };
+    struct Segment { // one run of an LED string in world space: its slice column and its share of the string
+        QVector3D a, b;
+        double column, run0, run1; // 0..1 across and along the slice (the mapping wall_strings() draws with)
+        json slice;
+    };
+    std::vector<Wall> walls;
+    std::vector<Segment> segments;
+    for (const json &o : project.value("objects", json::array())) {
+        if (o.value("type", std::string()) != "ledWall")
+            continue;
+        const QMatrix4x4 m = world_transform(project, o);
+        const json slice = o.value("slice", json::object());
+        if (!(o.contains("strings") && o.at("strings").is_array() && !o.at("strings").empty())) {
+            walls.push_back({m.inverted(), m, o.value("width", 4.0f), o.value("height", 2.5f), slice});
+            continue;
+        }
+        const json &strings = o.at("strings");
+        for (std::size_t i = 0; i < strings.size(); ++i) {
+            std::vector<QVector3D> pts;
+            for (const json &v : strings[i])
+                pts.push_back(m.map(vec3(v)));
+            float total = 0;
+            for (std::size_t k = 1; k < pts.size(); ++k)
+                total += (pts[k] - pts[k - 1]).length();
+            if (total <= 0)
+                continue;
+            float run = 0;
+            for (std::size_t k = 1; k < pts.size(); ++k) {
+                const float len = (pts[k] - pts[k - 1]).length();
+                segments.push_back({pts[k - 1], pts[k], (double(i) + 0.5) / double(strings.size()), run / total,
+                                    (run + len) / total, slice});
+                run += len;
+            }
+        }
+    }
+    const json comp = project.value("composition", json::object());
+    const double cw = comp.value("width", 1920.0), ch = comp.value("height", 1080.0);
+    const auto at = [&](const json &slice, double u, double v) { // slice origin top-left
+        return json{{"x", slice.value("x", 0.0) + u * slice.value("w", cw)},
+                    {"y", slice.value("y", 0.0) + v * slice.value("h", ch)},
+                    {"w", 0},
+                    {"h", 0}};
+    };
+    std::vector<json> out;
+    for (const json &o : project.value("objects", json::array())) {
+        if (!generator_fixture(o, library))
+            continue;
+        const QVector3D p = world_transform(project, o).map(QVector3D());
+        json probe;
+        float best = std::numeric_limits<float>::max();
+        for (const Wall &w : walls) {
+            const QVector3D l = w.inverse.map(p);
+            // The wall quad is bottom-centre anchored: x in ±width/2, y in 0..height (see wall()).
+            const QVector3D q(std::clamp(l.x(), -w.width / 2, w.width / 2), std::clamp(l.y(), 0.f, w.height), 0);
+            const float d = (w.world.map(q) - p).lengthSquared();
+            if (d >= best)
+                continue;
+            best = d;
+            probe = at(w.slice, q.x() / w.width + 0.5, 1.0 - q.y() / w.height);
+        }
+        for (const Segment &sg : segments) {
+            const QVector3D ab = sg.b - sg.a;
+            const float l2 = ab.lengthSquared();
+            const float s = l2 > 0 ? std::clamp(QVector3D::dotProduct(p - sg.a, ab) / l2, 0.f, 1.f) : 0.f;
+            const float d = (sg.a + ab * s - p).lengthSquared();
+            if (d >= best)
+                continue;
+            best = d;
+            probe = at(sg.slice, sg.column, sg.run0 + (sg.run1 - sg.run0) * s);
+        }
+        out.push_back(std::move(probe));
+    }
+    return out;
+}
+
 std::vector<proto::GeneratorTarget> generator_targets(const json &project, const FixtureLibrary &library) {
     std::vector<proto::GeneratorTarget> out;
     for (const json &o : project.value("objects", json::array())) {
+        if (!generator_fixture(o, library))
+            continue;
         const json &patch = o.value("patch", json());
         auto it = library.find(o.value("gdtf", std::string()));
-        if (o.value("type", std::string()) != "fixture" || !patch.is_object() || it == library.end())
-            continue;
         const gdtf::Mode *mode = it->second.mode(o.value("mode", std::string()));
         if (!mode)
             mode = &it->second.modes.front();

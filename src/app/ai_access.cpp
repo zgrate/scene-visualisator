@@ -476,6 +476,23 @@ std::vector<Tool> make_mcp_tools(Session &s) {
             st["output"] = to_json(s.output_status());
             return text(st);
         });
+    add("get_render",
+        "Offline render progress (also get_recording.render): active, frame, frames, path, error, elapsedMs, rate "
+        "(frames/s over the last 2 s), etaMs, queue (frames the encoder holds), stages {waitVideo, waitDmx, "
+        "waitEncoder, build, draw, readback, push} (ms per frame over the last 20: the widest is the bottleneck), "
+        "width, height, fps, quality, samples, backend, device, encoder, previewSerial. preview: true adds the "
+        "latest rendered frame as a PNG (480 px wide).",
+        schema({{"preview", {{"type", "boolean"}}}}), true, [&s, text](const json &args) {
+            const json st = to_json(s.recording()["render"].toMap());
+            const QImage img = s.renderPreview();
+            if (!args.value("preview", false) || img.isNull())
+                return text(st);
+            QByteArray png;
+            QBuffer buffer(&png);
+            buffer.open(QIODevice::WriteOnly);
+            img.save(&buffer, "PNG");
+            return sv::mcp::image_result(png.toBase64().toStdString(), st);
+        });
     add("get_fixture",
         "What a fixture receives and shows: its DMX per channel and the decoded attributes the "
         "renderer uses (dimmer 0..1, pan/tilt degrees, colour, beam angle, shutter).",
@@ -779,18 +796,32 @@ std::vector<Tool> make_mcp_tools(Session &s) {
             }
             return text({{"fixtures", written}});
         });
-    add("set_generator", "Runs an internal test pattern on every patched fixture: off, full, chase, rainbow, sweep.",
-        schema({{"pattern", {{"type", "string"}, {"enum", {"off", "full", "chase", "rainbow", "sweep"}}}}},
+    json pattern_enum = json::array();
+    for (const auto &[name, pattern] : sv::proto::pattern_names)
+        pattern_enum.push_back(name);
+    add("set_generator",
+        "Runs an internal test pattern on every patched fixture: off, full, chase, rainbow, sweep, or mapping (each "
+        "fixture shows the composition colour at the nearest LED wall point, so the rig follows the screens). "
+        "mapping options, kept as preferences: smoothMs (transition time constant, 0 off, default 150) and max "
+        "(0..1 ceiling per channel, default 1).",
+        schema({{"pattern", {{"type", "string"}, {"enum", pattern_enum}}},
+                {"smoothMs", {{"type", "number"}, {"minimum", 0}, {"maximum", 5000}}},
+                {"max", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}}},
                {"pattern"}),
         false, [&s, text](const json &args) {
-            using P = sv::proto::Pattern;
-            static const std::map<std::string, P> patterns{
-                {"off", P::off}, {"full", P::full}, {"chase", P::chase}, {"rainbow", P::rainbow}, {"sweep", P::sweep}};
-            const auto it = patterns.find(args.at("pattern"));
-            if (it == patterns.end())
+            const std::string name = args.at("pattern");
+            const auto it =
+                std::ranges::find(sv::proto::pattern_names, name, [](const auto &p) { return std::string(p.first); });
+            if (it == sv::proto::pattern_names.end())
                 throw std::runtime_error("Unknown pattern");
+            if (args.contains("smoothMs"))
+                Session::setPreference("generatorSmoothMs", args.at("smoothMs").get<double>());
+            if (args.contains("max"))
+                Session::setPreference("generatorMax", args.at("max").get<double>());
             s.set_generator(it->second);
-            return text({{"pattern", it->first}});
+            return text({{"pattern", name},
+                         {"smoothMs", Session::preference("generatorSmoothMs", 150).toDouble()},
+                         {"max", Session::preference("generatorMax", 1.0).toDouble()}});
         });
     add("set_composition_source",
         "Replaces composition.source, e.g. {\"kind\":\"testPattern\"}, {\"kind\":\"grid\"}, "
@@ -900,7 +931,8 @@ std::vector<Tool> make_mcp_tools(Session &s) {
     const json drawing_kind = {{"type", "string"}, {"enum", {"plan", "front", "side"}}};
     add("get_drawing",
         "A plan or elevation sheet's settings: sheet (A3, A4), scale (1:N, 0 fits), title, hiddenLayers, dimensions "
-        "[{a: [u, v], b: [u, v], offset?: mm}], notes [{at: [u, v], text, to?: [u, v]}], autoDimensions, labels, legend (default on) and schedule (a fixture table, "
+        "[{a: [u, v], b: [u, v], offset?: mm}], notes [{at: [u, v], text, to?: [u, v]}], autoDimensions, labels, "
+        "legend (default on) and schedule (a fixture table, "
         "default off). "
         "u and v are drawing metres: plan (x, z), front (x, -y), side (-z, -y).",
         schema({{"kind", drawing_kind}}, {"kind"}), true,
@@ -912,8 +944,8 @@ std::vector<Tool> make_mcp_tools(Session &s) {
                 {"key",
                  {{"type", "string"},
                   {"enum",
-                   {"sheet", "scale", "title", "hiddenLayers", "dimensions", "notes", "autoDimensions", "labels", "legend",
-                    "schedule"}}}},
+                   {"sheet", "scale", "title", "hiddenLayers", "dimensions", "notes", "autoDimensions", "labels",
+                    "legend", "schedule"}}}},
                 {"value", json::object()}},
                {"kind", "key", "value"}),
         false, [&s, text](const json &args) {
@@ -932,15 +964,54 @@ std::vector<Tool> make_mcp_tools(Session &s) {
     add(
         "record",
         "Records the show: merged DMX to <path>.svdmx, plus the composition to <path>.mp4 while a live media source "
-        "runs (lossless: near-lossless 150 Mbit/s). stop: true ends it.",
-        schema({{"path", {{"type", "string"}}}, {"stop", {{"type", "boolean"}}}, {"lossless", {{"type", "boolean"}}}}),
+        "runs (lossless: near-lossless 150 Mbit/s). view: true also records the 3D viewport to <path>.view.mp4 (only "
+        "while it is shown). stop: true ends it.",
+        schema({{"path", {{"type", "string"}}},
+                {"stop", {{"type", "boolean"}}},
+                {"lossless", {{"type", "boolean"}}},
+                {"view", {{"type", "boolean"}}}}),
         true,
         [&s, text](const json &args) {
             if (args.value("stop", false))
                 s.stopRecording();
             else if (args.contains("path"))
-                fail_if(s.startRecording(QUrl::fromLocalFile(qs(args, "path")), args.value("lossless", false)));
+                fail_if(s.startRecording(QUrl::fromLocalFile(qs(args, "path")), args.value("lossless", false),
+                                         args.value("view", false)));
             return text(to_json(s.recording()));
+        },
+        files);
+    add(
+        "render_video",
+        "Renders the loaded take (play), else the composition video, frame by frame to an mp4: smooth at any GPU "
+        "speed. Each frame seeks the videos and the take's DMX to its time, then draws the 3D view at width x height "
+        "(default 1920x1080). start and duration in ms (duration defaults to the take's or video's length). camera "
+        "is a list of keys [{t (ms from start), target, yaw, pitch, distance, fov}], eased between, else the current "
+        "view. quality: cinematic (default: the rig and LED walls light the stage, reflections, ray-marched beams, "
+        "filmic tone map, 2x supersampled) or high (the 3D view's look); samples: sub-frames per frame for motion "
+        "blur (default 4 in cinematic, else 1); supersample (default true) draws cinematic frames at 2x, false is ~4x "
+        "faster with softer edges. The file has no audio. Progress: get_render. stop: true ends it.",
+        schema({{"path", {{"type", "string"}}},
+                {"stop", {{"type", "boolean"}}},
+                {"fps", {{"type", "number"}, {"minimum", 1}, {"maximum", 240}}},
+                {"start", {{"type", "number"}, {"minimum", 0}}},
+                {"duration", {{"type", "number"}, {"minimum", 1}}},
+                {"width", {{"type", "integer"}, {"minimum", 16}}},
+                {"height", {{"type", "integer"}, {"minimum", 16}}},
+                {"lossless", {{"type", "boolean"}}},
+                {"quality", {{"type", "string"}, {"enum", {"cinematic", "high"}}}},
+                {"samples", {{"type", "integer"}, {"minimum", 1}, {"maximum", 64}}},
+                {"supersample", {{"type", "boolean"}}},
+                {"camera", {{"type", "array"}, {"items", {{"type", "object"}}}}}}),
+        true,
+        [&s, text](const json &args) {
+            if (args.value("stop", false)) {
+                s.stopRender();
+            } else {
+                if (!args.contains("path"))
+                    throw std::runtime_error("Missing argument: path");
+                fail_if(s.startRender(to_variant(args).toMap()));
+            }
+            return text(to_json(s.recording()["render"].toMap()));
         },
         files);
     add(
@@ -1158,7 +1229,7 @@ void Session::stop_ai() {
     ai_.reset();
 }
 
-QVariantMap Session::ai_status() const {
+QVariantMap Session::ai_status_now() const {
     const auto st = ai_ ? ai_->status() : sv::mcp::Status{};
     const QString token = preference("aiToken").toString();
     const int port = st.listening ? st.port : preference("aiPort", 7311).toInt();
@@ -1214,7 +1285,7 @@ void Session::setDebugMode(bool on, bool persist) {
     debug_ = on;
     if (persist)
         setPreference("debug", on);
-    QLoggingCategory::setFilterRules(on ? QStringLiteral("sv.*.debug=true") : QString());
+    QLoggingCategory::setFilterRules(QLatin1StringView(encoder_log_rule) + (on ? "\nsv.*.debug=true" : ""));
     qCInfo(lcMcp) << "debug mode" << (on ? "on" : "off");
     Q_EMIT changed();
 }

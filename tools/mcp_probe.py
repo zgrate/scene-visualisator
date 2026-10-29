@@ -2,9 +2,11 @@
 """Checks a running visualiser's AI access (MCP over HTTP) end to end: handshake, tools, a screenshot, an edit and
 its undo. Stdlib only. The token comes from --token, or this machine's Scene Visualiser settings.
 
-  python3 tools/mcp_probe.py [--url http://127.0.0.1:7311/mcp] [--token T] [--png out.png] [--wait 30]
+  python3 tools/mcp_probe.py [--url http://127.0.0.1:7311/mcp] [--token T] [--png out.png] [--wait 30] [--record]
+
+--record also records a second of show with the 3D view, then renders half a second offline (needs file access, and the app on this machine).
 """
-import argparse, base64, configparser, json, os, sys, time, urllib.error, urllib.request
+import argparse, base64, configparser, json, os, sys, tempfile, time, urllib.error, urllib.request
 
 
 def local_token():
@@ -53,6 +55,7 @@ def main():
     ap.add_argument("--token", default=None)
     ap.add_argument("--png", default=None, help="save the screenshot here")
     ap.add_argument("--wait", type=float, default=0, help="seconds to wait for the app to start listening")
+    ap.add_argument("--record", action="store_true", help="record a second with the 3D view and check the mp4")
     a = ap.parse_args()
     c = Client(a.url, a.token if a.token is not None else local_token())
 
@@ -99,6 +102,29 @@ def main():
 
     fixture = c.call("get_fixture", uuid=uuid)["structuredContent"]
     print("fixture", fixture.get("patch"), "dimmer", fixture.get("decoded", {}).get("dimmer"))
+
+    if a.record:
+        base = os.path.join(tempfile.mkdtemp(), "take")
+        c.call("record", path=base + ".svdmx", view=True)
+        time.sleep(1.5)
+        rec = c.call("record", stop=True)["structuredContent"]
+        view = base + ".view.mp4"
+        size = os.path.getsize(view) if os.path.exists(view) else 0
+        if rec.get("error") and not size:  # no H.264 encoder in this FFmpeg build
+            print("view recording skipped:", rec["error"])
+        else:
+            assert size > 0, f"empty {view}"
+            print("view recording", size, "bytes")
+            out = base + ".render.mp4"
+            c.call("render_video", path=out, fps=10, duration=500, width=320, height=180)
+            for _ in range(120):
+                time.sleep(0.5)
+                render = c.call("get_recording")["structuredContent"]["render"]
+                if not render["active"]:
+                    break
+            assert not render["active"] and not render["error"], f"render: {render}"
+            assert render["frame"] == 5 and os.path.getsize(out) > 0, f"render: {render}"
+            print("offline render", os.path.getsize(out), "bytes")
     print("OK")
 
 

@@ -4,7 +4,7 @@ add_library(sv_render STATIC
     drawing_painter.cpp drawing_painter.h
     scene_builder.cpp scene_builder.h
     transform_math.cpp transform_math.h
-    scene_renderer.cpp scene_renderer.h
+    frame_accumulator.cpp frame_accumulator.h scene_renderer.cpp scene_renderer.h
     test_pattern.cpp test_pattern.h)
 target_include_directories(sv_render PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # QRhi headers (rhi/qrhi.h) ship with limited compatibility guarantees and need GuiPrivate.
@@ -16,4 +16,5 @@ qt_add_shaders(sv_render "sv_shaders"
         shaders/grid.vert shaders/grid.frag
         shaders/mesh.vert shaders/mesh.frag
         shaders/wall.vert shaders/wall.frag
-        shaders/beam.vert shaders/beam.frag)
+        shaders/beam.vert shaders/beam.frag
+        shaders/post.vert shaders/bloom_down.frag shaders/bloom_up.frag shaders/composite.frag shaders/accumulate.frag)

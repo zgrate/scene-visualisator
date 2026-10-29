@@ -386,6 +386,23 @@ Rectangle {
                             font.pixelSize: Theme.small + 1
                         }
                     }
+                    RowLayout {
+                        spacing: 6
+                        Label { text: qsTr("Render quality"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
+                        ComboBox {
+                            implicitWidth: 170
+                            model: [qsTr("High"), qsTr("Fast")]
+                            currentIndex: Session.preference("renderQuality", "high") === "fast" ? 1 : 0
+                            onActivated: i => Session.setPreference("renderQuality", i ? "fast" : "high")
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            text: qsTr("High: HDR, bloom on lenses and LED walls, drifting haze in beams. Fast: for weak GPUs.")
+                            color: Theme.muted
+                            font.pixelSize: Theme.small + 1
+                        }
+                    }
                     Check {
                         text: qsTr("Emulate numpad (top-row digits, - and =) · ? or F1 lists every key")
                         checked: String(Session.preference("emulateNumpad", false)) === "true"

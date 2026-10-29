@@ -140,6 +140,46 @@ Popup {
             font.pixelSize: Theme.small + 1
         }
 
+        // The internal DMX test source (FR-11). Mapping gives each fixture the colour under the nearest LED wall point.
+        Label {
+            Layout.topMargin: 6
+            text: qsTr("DMX GENERATOR")
+            color: Theme.muted
+            font.pixelSize: 8
+            font.letterSpacing: 1.2
+        }
+        ComboBox {
+            Layout.fillWidth: true
+            readonly property var patterns: [["off", qsTr("Off")], ["full", qsTr("Full")], ["chase", qsTr("Chase")],
+                                             ["rainbow", qsTr("Rainbow")], ["sweep", qsTr("Sweep")],
+                                             ["mapping", qsTr("Mapping (follow the walls)")]]
+            model: patterns.map(p => p[1])
+            currentIndex: Math.max(0, patterns.findIndex(p => p[0] === Session.generator))
+            onActivated: i => Session.setGenerator(patterns[i][0])
+        }
+        // Mapping: a transition between LED colours and a ceiling, so cuts do not flash the rig.
+        RowLayout {
+            visible: Session.generator === "mapping"
+            spacing: 8
+            Label { text: qsTr("Smooth"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
+            Input {
+                Layout.preferredWidth: 56
+                text: String(Session.preference("generatorSmoothMs", 150))
+                font.family: Theme.mono
+                validator: IntValidator { bottom: 0; top: 5000 }
+                onEditingFinished: Session.setPreference("generatorSmoothMs", Number(text) || 0)
+            }
+            Label { text: qsTr("ms · Max"); color: Theme.muted; font.pixelSize: Theme.small + 1 }
+            Input {
+                Layout.preferredWidth: 44
+                text: String(Math.round(Session.preference("generatorMax", 1) * 100))
+                font.family: Theme.mono
+                validator: IntValidator { bottom: 0; top: 100 }
+                onEditingFinished: Session.setPreference("generatorMax", (Number(text) || 0) / 100)
+            }
+            Label { text: "%"; color: Theme.muted; font.pixelSize: Theme.small + 1 }
+        }
+
         // One feed per Resolume output (Arena sends an NDI stream per Screen); its walls show their output rect of
         // it. Lumiverse outputs come in over Art-Net/sACN and only show their state.
         RowLayout {
